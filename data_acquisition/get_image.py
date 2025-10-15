@@ -75,7 +75,7 @@ def run(args):
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 batch_data = json.load(f)
-            
+
             for listing in batch_data:
                 listing_id = listing.get('id')
                 images = listing.get('gallery', {}).get('images', [])
@@ -126,8 +126,8 @@ def run(args):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('-j', '--json', type=str, default='../../data/scraped/SeLoger', help="Dossier contenant les fichiers JSON.")
-    parser.add_argument('-o', '--output', type=str, default='../output/images', help="Dossier de sortie pour les images.")
+    parser.add_argument('-j', '--json', type=str, default='../../data/SeLoger/json', help="Dossier contenant les fichiers JSON.")
+    parser.add_argument('-o', '--output', type=str, default='../../data/SeLoger/images', help="Dossier de sortie pour les images.")
     parser.add_argument('-w', '--workers', type=int, default=multiprocessing.cpu_count()-1, help="Nombre de processus parallèles (par défaut: tous les cœurs disponibles).")
     args = parser.parse_args()
 
