@@ -126,8 +126,8 @@ def run(args):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('-j', '--json', type=str, default='../../data/SeLoger/json', help="Dossier contenant les fichiers JSON.")
-    parser.add_argument('-o', '--output', type=str, default='../../data/SeLoger/images', help="Dossier de sortie pour les images.")
+    parser.add_argument('-j', '--json', type=str, default='../../data/SeLoger/Toulouse/json', help="Dossier contenant les fichiers JSON.")
+    parser.add_argument('-o', '--output', type=str, default='../../data/SeLoger/Toulouse/images', help="Dossier de sortie pour les images.")
     parser.add_argument('-w', '--workers', type=int, default=multiprocessing.cpu_count()-1, help="Nombre de processus parallèles (par défaut: tous les cœurs disponibles).")
     args = parser.parse_args()
 
