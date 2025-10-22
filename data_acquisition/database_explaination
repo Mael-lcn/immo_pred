@@ -1,0 +1,33 @@
+Nous avons pour idée initial de prendre des données sur SeLoger car ce site regroupe des annonces de pleins d'agence immobilière différente
+donc nous n'avons pas de biais apportés par par le type de bien privilégié par une agence X (imaginons une agence de luxe par example) cela nous permet d'avoir un echantillons représentatifs
+du marché de l'immobilier dans sons ensemble.
+Toujours dans l'idée d'avoir une BD représentative, nous nous sommes demandé si SeLoger seul était suffisant, si cette source etait réellement representative, c'est pourquoi nous avons également envisager une autre source qui est LeBonCoin (lbc)
+Le but est de minimiser les possibles biais apportés par SeLoger si tant est qu'il y en a. Le choix du boncoin nous à sembler etre une évidence car il y a une contrainte technique pour le scrapping de SeLoger on peut faire des recherches que pour une ville à 50km autour. Hor nous voullons un echantillon le plus représentatif possible
+Donc j'aurais voulu pouvoir rechercher dans toute la France dans un ordre random et recueprer les N 1er annonces. Ce qui est permis par Lbc. Mais nous avons vu que les données scrappable sur lbc ne sont pas assez complète nous perdons des features assez informative (ex: ). Donc nous avons écraté cette piste pour finallement garder que SeLoger car après une annalyse des données scrapper depuis SL,
+il apparait que les données ne sont pas biaisés nous avons une distribution des prix suivant une loi normal de moyenne (mean=) et d'écart type (std=). Cela est en adéquation avec notre appriori du monde réél et le donnée de (cité vrai données)
+
+
+
+Porcedure de scrapping de SeLoger:
+Contrainte: Recherche se fait dans un rayon de 50km max autour d'un lieu
+
+Du à la contrainte de recherche, j'ai procédé comme suit:
+    Choisir 10 ville de taille moyenne à grande: via une requete a Gemini pour avoir des villes représentative (Ouest, sud, nord, etc)
+    Paris
+    Toulouse
+    Strasbourg
+    Lille
+    Reims
+    Saint-Étienne
+    Grenoble
+    Dijon
+    Nantes
+    Bordeaux
+
+On récupère les N premières page du site avec la recherche dans un rayon de 50km comme ca on a de la campagne également.
+
+idem pour les locations
+
+le scéma obtenu après filtrage des metadata du site est le suivant:  
+
+

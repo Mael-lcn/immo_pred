@@ -116,8 +116,8 @@ def run(args):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('-j', '--json', type=str, default='../../data//SeLoger/json', help="Dossier contenant les fichiers JSON source.")
-    parser.add_argument('-o', '--output', type=str, default='../../data/SeLoger/csv', help="Dossier de sortie pour les fichiers CSV complets générés.")
+    parser.add_argument('-j', '--json', type=str, default='../../data/SeLoger/achat/json', help="Dossier contenant les fichiers JSON source.")
+    parser.add_argument('-o', '--output', type=str, default='../../data/SeLoger/achat/csv', help="Dossier de sortie pour les fichiers CSV complets générés.")
     parser.add_argument('-w', '--workers', type=int, default=multiprocessing.cpu_count()-1)
     args = parser.parse_args()
 
