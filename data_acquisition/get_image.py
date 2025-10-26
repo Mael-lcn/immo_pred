@@ -30,12 +30,12 @@ def download_image(image_info, output_dir):
     Retourne 0 en cas d'échec, ou la taille du fichier s'il existe déjà.
     """
     listing_id, image_key, image_url = image_info
-    
+
     target_dir = os.path.join(output_dir, listing_id)
     os.makedirs(target_dir, exist_ok=True)
-    
+
     filepath = os.path.join(target_dir, f"{image_key}.jpg")
-    
+
     # Si le fichier existe déjà, on retourne sa taille sans le retélécharger
     if os.path.exists(filepath):
         return os.path.getsize(filepath)
