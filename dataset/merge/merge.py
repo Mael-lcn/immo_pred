@@ -10,28 +10,31 @@ import math
 
 
 
-colonnes_cibles = [
-    "id", "price", "property_type", "title", "description", "region", "city", "postal_code",
-    "living_area", "bedrooms", "rooms", "floor", "energy_class",
-    "year_built", "sale_type", "seller_type", "reference", "images",
-]
-
 rename_dict_lbc = {
-    "typeBien": "property_type",
-    "titre": "title",
-    "description": "description",
+    "etat_bien": "property_status",
+    "prix": "price",
     "ville": "city",
-    "zipcode": "postal_code",
-    "surface": "living_area",
-    "nbChambres": "bedrooms",
-    "nbPieces": "rooms",
-    "etage": "floor",
-    "classe_energetique": "energy_class",
-    "annee_de_construction": "year_built",
-    "typeVente": "sale_type",
-    "typeVendeur": "seller_type",
-    "reference": "reference",
+    "region": "region",
+    "codePostal": "postal_code",
+    "departement": "department",
+    "nb_pieces": "num_rooms",
+    "nb_chambres": "num_bedrooms",
+    "nb_salleDeBains": "num_bathrooms",
+    "classe_energetique": "energy_rating",
+    "orientation": "orientation",
+    "nb_placesParking": "num_parking_spaces",
+    "surface_habitable": "living_area_sqm",
+    "surface_totale_terrain": "total_land_area_sqm",
+    "nb_etages_Immeuble": "building_num_floors",
+    "nb_etages_Appartement": "apartment_floor_number",
+    "prix_metre_carre": "price_per_sqm",
+    "annee_construction": "year_built",
+    "specificites": "features",
+    "images_urls": "images",
+    "description": "description",
+    "reference": "reference"
 }
+
 
 rename_dict_sl = {
     "legacyTracking_price": "price",
@@ -41,16 +44,17 @@ rename_dict_sl = {
     "tracking_region": "region",
     "tracking_city": "city",
     "rawData_providerzipcode": "postal_code",
-    "rawData_surface_main": "living_area",
-    "rawData_nbroom": "rooms",
-    "rawData_nbbedroom": "bedrooms",
+    "rawData_surface_main": "living_area_sqm",
+    "rawData_nbroom": "num_rooms",
+    "rawData_nbbedroom": "num_bedrooms",
     "energyClass": "energy_class",
     "legacyTracking_year_of_construction": "year_built",
-    "rawData_distributionType": "sale_type",
-    "type": "seller_type",
     "gallery_images": "images",
-    "hardFacts_facts": "floor",
+    "hardFacts_facts": "features",
 }
+
+
+colonnes_cibles = list({*rename_dict_lbc.values(), *rename_dict_sl.values()})
 
 
 def worker(list_csv, output_dir, rename_dict):

@@ -132,7 +132,7 @@ def run(args):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('-i', '--input', type=str, default='input/SL')
+    parser.add_argument('-i', '--input', type=str, default='input/LBC')
     parser.add_argument('-o', '--output', type=str, default='output/')
     parser.add_argument('-w', '--workers', type=int, default=multiprocessing.cpu_count()-1)
     args = parser.parse_args()
