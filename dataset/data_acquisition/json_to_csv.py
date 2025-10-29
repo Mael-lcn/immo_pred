@@ -32,10 +32,22 @@ def flatten_json(data_dict):
     return out
 
 
+def sanitize_value(value):
+    """
+    Nettoie une valeur pour le CSV :
+    - Les strings sont converties en str, échappées et sans retour à la ligne ni ;
+    - Les autres types restent inchangés.
+    """
+    if isinstance(value, str):
+        # Supprime les retours à la ligne et remplace les ; par ,
+        return value.replace('\n', ' ').replace('\r', ' ').replace(';', ',').strip()
+    return value
+
+
 def convert_single_json_to_csv(json_file, output_dir):
     """
-    Lit un fichier JSON, aplatit chaque annonce, 
-    et écrit le résultat dans un CSV avec toutes les cellules entre guillemets.
+    Lit un fichier JSON, aplatit chaque annonce,
+    et écrit le résultat dans un CSV avec toutes les cellules entre guillemets et ; comme séparateur.
     """
     try:
         with open(json_file, 'r', encoding='utf-8') as f:
@@ -48,14 +60,13 @@ def convert_single_json_to_csv(json_file, output_dir):
         print(f"[WARN] Fichier JSON vide ou non conforme : {json_file}")
         return None
 
-    # Appliquer l'aplatissement
-    records = [flatten_json(listing) for listing in data]
+    # Appliquer l'aplatissement et nettoyage
+    records = [{k: sanitize_value(v) for k, v in flatten_json(listing).items()} for listing in data]
 
-    # Déterminer toutes les colonnes présentes dans les enregistrements
+    # Déterminer toutes les colonnes présentes
     all_fieldnames = set()
     for record in records:
         all_fieldnames.update(record.keys())
-
     sorted_fieldnames = sorted(list(all_fieldnames))
 
     # Nom du fichier CSV
@@ -64,10 +75,11 @@ def convert_single_json_to_csv(json_file, output_dir):
     csv_filename = f"{file_name_without_ext}.csv"
     output_filepath = os.path.join(output_dir, csv_filename)
 
-    # Écriture CSV avec toutes les cellules entre guillemets
+    # Écriture CSV avec ; comme séparateur
     try:
         with open(output_filepath, 'w', newline='', encoding='utf-8') as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=sorted_fieldnames, quoting=csv.QUOTE_ALL)
+            writer = csv.DictWriter(csvfile, fieldnames=sorted_fieldnames,
+                                    quoting=csv.QUOTE_ALL, delimiter=';')
             writer.writeheader()
             writer.writerows(records)
         return output_filepath
@@ -114,10 +126,10 @@ def run(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Conversion JSON → CSV sécurisée")
-    parser.add_argument('-j', '--json', type=str, default='../../data/SeLoger/achat/json')
-    parser.add_argument('-o', '--output', type=str, default='../../data/SeLoger/achat/all')
-    parser.add_argument('-w', '--workers', type=int, default=max(1, multiprocessing.cpu_count()-1))
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-j', '--json', type=str, default='../../../data/seLoger/seLogerAchats/json')
+    parser.add_argument('-o', '--output', type=str, default='../../data/SeLoger/achat/')
+    parser.add_argument('-w', '--workers', type=int, default=multiprocessing.cpu_count()-1)
     args = parser.parse_args()
 
     run(args)

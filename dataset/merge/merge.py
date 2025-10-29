@@ -4,207 +4,165 @@ import pandas as pd
 import time
 import glob
 from tqdm import tqdm
-
 from functools import partial
 import multiprocessing
-import csv
-
-
-
-# Tmp à cause de nom des fils....
-import sys
-sys.stdout.reconfigure(encoding='utf-8')
+import math
 
 
 
 colonnes_cibles = [
-    "id", "price", "property_type", "title", "description", "region", "city", "postal_code","living_area", "bedrooms", "rooms", "floor","energy_class",
-    "year_built", "sale_type", "seller_type","reference", "images",
+    "id", "price", "property_type", "title", "description", "region", "city", "postal_code",
+    "living_area", "bedrooms", "rooms", "floor", "energy_class",
+    "year_built", "sale_type", "seller_type", "reference", "images",
 ]
 
-rename_map = {
-    "prix": "price",
-    "type_bien": "property_type",
+rename_dict_lbc = {
+    "typeBien": "property_type",
     "titre": "title",
     "description": "description",
     "ville": "city",
-    "codePostal": "postal_code",
-    "surface_habitable": "living_area",
-    "nb_chambres": "bedrooms",
-    "nb_pieces": "rooms",
-    "nb_etages_Immeuble": "floor",
+    "zipcode": "postal_code",
+    "surface": "living_area",
+    "nbChambres": "bedrooms",
+    "nbPieces": "rooms",
+    "etage": "floor",
     "classe_energetique": "energy_class",
-    "annee_construction": "year_built",
-    "type_vente": "sale_type",
-    "type_vendeur": "seller_type",
+    "annee_de_construction": "year_built",
+    "typeVente": "sale_type",
+    "typeVendeur": "seller_type",
     "reference": "reference",
-    "images_urls": "images",
+}
+
+rename_dict_sl = {
+    "legacyTracking_price": "price",
+    "rawData_propertyType": "property_type",
+    "mainDescription_headline": "title",
+    "mainDescription_description": "description",
+    "tracking_region": "region",
+    "tracking_city": "city",
+    "rawData_providerzipcode": "postal_code",
+    "rawData_surface_main": "living_area",
+    "rawData_nbroom": "rooms",
+    "rawData_nbbedroom": "bedrooms",
+    "energyClass": "energy_class",
+    "legacyTracking_year_of_construction": "year_built",
+    "rawData_distributionType": "sale_type",
+    "type": "seller_type",
+    "gallery_images": "images",
+    "hardFacts_facts": "floor",
 }
 
 
-def worker(list_csv, output_dir):
+def worker(list_csv, output_dir, rename_dict):
     """
-    Parcourt une liste de fichiers CSV (chunk), les lit avec pandas,
-    renomme les colonnes, sauvegarde et (si verbose) retourne la liste
-    des couples (basename, set(columns)) pour chaque CSV traité.
+    Traite une liste de CSV et retourne [(basename, set(final_columns)), ...]
     """
     per_file = []
-
     for csv_path in list_csv:
         try:
-            # Lecture
-            df = pd.read_csv(csv_path, sep=";", dtype=str, encoding="utf8", quoting=csv.QUOTE_NONE)
+            df = pd.read_csv(csv_path, sep=";", quotechar='"')
 
-            # Renommage
-            df.rename(columns=rename_map, inplace=True)
+            df.rename(columns=rename_dict, inplace=True)
 
-            # Sauvegarde finale
+            # Select les colonnes à garder
+            final_cols_list = [c for c in colonnes_cibles if c in df.columns]
+            df_final = df[final_cols_list]
+
             output_file = os.path.join(output_dir, os.path.basename(csv_path))
-            df.to_csv(output_file, index=False)
+            df_final.to_csv(output_file,sep=";", index=False)
 
-            per_file.append((os.path.basename(csv_path), set(df.columns)))
-
+            per_file.append((os.path.basename(csv_path), set(df_final.columns.tolist())))
         except Exception as e:
             print(f"[ERROR] Erreur sur {csv_path}: {e}")
-
-    # Retourne la liste des (filename, set(columns)) pour ce chunk
     return per_file
 
 
-def run(args):
-    """
-    Orchestration principale.
-    inner_handler -> traite un dossier et retourne (not_always, always, per_file_cols)
-    """
-    start_time = time.monotonic()
-
-    output_dir = args.output
+def inner_handler(csv_src, rename_dict, output_dir, workers, desc_prefix=""):
+    output_dir = os.path.join(output_dir, desc_prefix)
     os.makedirs(output_dir, exist_ok=True)
 
-    # inner_handler traite un dossier csv_src et retourne le tuple demandé
-    def inner_handler(csv_src):
-        csv_list = glob.glob(os.path.join(csv_src, '*.csv'))
+    csv_list = glob.glob(os.path.join(csv_src, '*.csv'))
 
-        if not csv_list:
-            print(f"[WARN] Aucun fichier csv trouvé dans le dossier : {csv_src}")
-            return (set(), set(), {})  # tuple vide mais cohérent
+    if not csv_list:
+        print(f"[WARN] Aucun fichier csv trouvé dans : {csv_src}")
+        return set(), set(), {}
 
-        # calcul du chunksize pour diviser la liste par worker
-        if args.workers > 0:
-            chunksize = max(1, len(csv_list) // (args.workers))
+    # distribution équilibrée des fichiers par lot
+    workers = max(1, workers)
+    chunksize = math.ceil(len(csv_list) / workers)
+    data = [csv_list[i:i+chunksize] for i in range(0, len(csv_list), chunksize)]
+    num_processes = min(workers, len(data))
+
+    print(f"Traitement {os.path.basename(csv_src)}: {len(csv_list)} fichiers -> {len(data)} lots, processes={num_processes}, chunksize={chunksize}")
+
+    fun = partial(worker, rename_dict=rename_dict, output_dir=output_dir)
+    all_per_file = []
+
+    with multiprocessing.Pool(processes=num_processes) as pool:
+        for chunk_result in tqdm(pool.imap_unordered(fun, data), total=len(data), desc=desc_prefix or f"Normalisation {os.path.basename(csv_src)}"):
+            all_per_file.extend(chunk_result)
+
+    per_file_final = {fname: cols for fname, cols in all_per_file}
+
+    # calculs sûrs d'union / intersection
+    final_sets = list(per_file_final.values())
+
+    if not final_sets:
+        union_cols = set()
+        intersection_cols = set()
+    else:
+        union_cols = set().union(*final_sets)
+        if len(final_sets) == 1:
+            intersection_cols = set(final_sets[0])
         else:
-            chunksize = len(csv_list)
+            intersection_cols = set(final_sets[0]).intersection(*final_sets[1:])
 
-        data = [csv_list[i:i+chunksize] for i in range(0, len(csv_list), chunksize)]
-
-        print(f"Utilisation de {args.workers} workers avec une taille de lot (chunksize) de {chunksize} (dossiers: {len(csv_list)} fichiers).")
-
-        fun = partial(worker, output_dir=output_dir)
-        all_per_file = []
-
-        # multiprocessing
-        with multiprocessing.Pool(processes=args.workers) as pool:
-            # imap_unordered renvoie un résultat par chunk
-            for chunk_result in tqdm(pool.imap_unordered(fun, data), total=len(data), desc=f"Normalisation des CSV dans {os.path.basename(csv_src)}"):
-                all_per_file.extend(chunk_result)
-
-        # Construire dict filename -> set(columns)
-        per_file_cols = {fname: cols for fname, cols in all_per_file}
-
-        # calculs d'union et d'intersection
-        sets = list(per_file_cols.values())
-        union_cols = set().union(*sets)
-        intersection_cols = set(sets[0]).intersection(*sets[1:]) if len(sets) > 1 else set(sets[0])
-
-        not_always = union_cols - intersection_cols
-        always = intersection_cols
-
-        # Affichage synthétique (interne) si verbose
-        if args.verbose:
-            print(f"\n[Dossier] {csv_src}: {len(per_file_cols)} fichiers analysés.")
-            print(f"- Colonnes totales rencontrées (union) : {len(union_cols)}")
-            print(f"- Colonnes présentes dans tous les fichiers (intersection) : {len(always)}")
-            print(f"- Colonnes manquantes dans au moins un fichier : {len(not_always)}\n")
-
-        return (not_always, always, per_file_cols)
+    return union_cols, intersection_cols, per_file_final
 
 
-    # Appels à inner_handler pour les deux dossiers (SL et LBC)
-    result_sl = inner_handler(args.sl_csv)
-    #result_lbc = inner_handler(args.lbc_csv) if args.lbc_csv else (set(), set(), {})
-    result_lbc = (set(), set(), {})
+def run(args):
+    t0 = time.monotonic()
+
+    union_sl, inter_sl, per_file_sl = inner_handler(args.sl_csv, rename_dict_sl,  args.output, args.workers, desc_prefix="SL")
+    union_lbc, inter_lbc, per_file_lbc = inner_handler(args.lbc_csv, rename_dict_lbc, args.output, args.workers, desc_prefix="LBC")
+
+    # comparaisons utiles
+    always_both = inter_sl & inter_lbc
+    only_in_sl = union_sl - union_lbc
+    only_in_lbc = union_lbc - union_sl
+    inter_of_union = union_sl & union_lbc  # apparait au moins une fois dans les deux
 
     if args.verbose:
-        # Déballage des résultats
-        not_always_sl, always_sl, per_file_sl = result_sl
-        not_always_lbc, always_lbc, per_file_lbc = result_lbc
+        print("\nRésumé par source")
+        print(f"[FILES] SL = {len(per_file_sl)} fichiers traités  |  LBC = {len(per_file_lbc)} fichiers traités")
+        print()
+        print(f"[SCHEMA][SL][UNION] Colonnes trouvées dans AU MOINS 1 fichier SL ({len(union_sl)}): {sorted(union_sl)}")
+        print(f"[SCHEMA][SL][INTERSECTION] Colonnes présentes DANS TOUS les fichiers SL ({len(inter_sl)}): {sorted(inter_sl)}")
+        print(f"[SCHEMA][SL][Naming des missing] Noms des Colonnes pouvant manquer DANS TOUS les fichiers SL ({len(union_sl-inter_sl)}): {sorted(union_sl-inter_sl)}")
+        print()
+        print(f"[SCHEMA][LBC][UNION] Colonnes trouvées dans AU MOINS 1 fichier LBC ({len(union_lbc)}): {sorted(union_lbc)}")
+        print(f"[SCHEMA][LBC][INTERSECTION] Colonnes présentes DANS TOUS les fichiers LBC ({len(inter_lbc)}): {sorted(inter_lbc)}")
+        print(f"[SCHEMA][LBC][Naming des missing] Noms des Colonnes pouvant manquer DANS TOUS les fichiers LBC ({len(union_lbc-inter_lbc)}): {sorted(union_lbc-inter_lbc)}")
+        print()
+        # comparaisons entre sources — libellés précis
+        print(f"[COMPARE][ALWAYS_IN_ALL_FILES_BOTH] Colonnes présentes DANS TOUS les fichiers SL ET DANS TOUS les fichiers LBC: {sorted(always_both)}")
+        print(f"[COMPARE][PRESENT_AT_LEAST_ONCE_BOTH] Colonnes présentes AU MOINS UNE FOIS dans SL ET AU MOINS UNE FOIS dans LBC: {sorted(inter_of_union)}")
+        print()
+        print(f"[COMPARE][ONLY_IN_SL] Colonnes présentes AU MOINS UNE FOIS dans SL et JAMAIS dans LBC: {sorted(only_in_sl)}")
+        print(f"[COMPARE][ONLY_IN_LBC] Colonnes présentes AU MOINS UNE FOIS dans LBC et JAMAIS dans SL: {sorted(only_in_lbc)}")
 
-        # Comparaisons inter-dossiers
-        union_sl = set().union(*per_file_sl.values()) if per_file_sl else set()
-        union_lbc = set().union(*per_file_lbc.values()) if per_file_lbc else set()
-
-        # Colonnes toujours présentes dans A et B -> intersection
-        always_both = always_sl & always_lbc
-
-        # Colonnes toujours dans A mais pas toujours dans B (et inverse)
-        always_only_sl = always_sl - always_lbc
-        always_only_lbc = always_lbc - always_sl
-
-        # Colonnes présentes dans A (au moins une fois) mais jamais dans B (et inverse)
-        only_in_sl = union_sl - union_lbc
-        only_in_lbc = union_lbc - union_sl
-
-        # Impression finale
-        print("\n--- Comparaison Finale entre dossiers ---")
-        print(f"Fichiers analysés : SL={len(per_file_sl)} | LBC={len(per_file_lbc)}")
-        print("\nColonnes toujours présentes (intersection SL ∩ LBC):")
-        print(sorted(always_both))
-
-        print("\nColonnes toujours dans SL mais pas toujours dans LBC:")
-        print(sorted(always_only_sl))
-
-        print("\nColonnes toujours dans LBC mais pas toujours dans SL:")
-        print(sorted(always_only_lbc))
-
-        print("\nColonnes présentes dans SL (au moins une fois) mais jamais dans LBC:")
-        print(sorted(only_in_sl))
-
-        print("\nColonnes présentes dans LBC (au moins une fois) mais jamais dans SL:")
-        print(sorted(only_in_lbc))
-
-        print("\n--- Détails par dossier ---")
-        print("SL - colonnes toujours présentes:", sorted(always_sl))
-        print("SL - colonnes pas toujours présentes:", sorted(not_always_sl))
-        print("LBC - colonnes toujours présentes:", sorted(always_lbc))
-        print("LBC - colonnes pas toujours présentes:", sorted(not_always_lbc))
-
-        """
-        # Exemple de sortie par fichier (peu verbeux si beaucoup de fichiers)
-        print("\nExtrait des colonnes par fichier (quelques fichiers si nombreux):")
-        for i, (fname, cols) in enumerate(list(per_file_sl.items())[:10]):
-            print(f" SL/{fname}: {sorted(cols)}")
-        for i, (fname, cols) in enumerate(list(per_file_lbc.items())[:10]):
-            print(f" LBC/{fname}: {sorted(cols)}")
-        """
-
-    # Statistiques temps
-    end_time = time.monotonic()
-    duration = end_time - start_time
-    minutes, seconds = divmod(duration, 60)
-
-    print("\n--- Statistiques Finales ---")
-    print(f"Temps total d'exécution : {int(minutes)} minutes et {seconds:.2f} secondes.")
-    print(f"Les CSV normalisés sont dans : {output_dir}")
+    dt = time.monotonic() - t0
+    print(f"\nTemps: {dt:.2f}s. CSV normalisés dans : {args.output}")
 
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('-sl', '--sl_csv', type=str, default='../data/leBonCoinAchats')
-    parser.add_argument('-lbc', '--lbc_csv', type=str, default='../data/seLogerAchats')
-    parser.add_argument('-o', '--output', type=str, default='../output/SeLoger/')
-    parser.add_argument('-w', '--workers', type=int, default=multiprocessing.cpu_count()-1)
-    parser.add_argument('-v', '--verbose', action='store_true', help="Affiche les schémas/colonnes par fichier et les comparaisons détaillées.")
+    parser.add_argument('-sl','--sl_csv', type=str, default='../../data/SeLoger/achat/')
+    parser.add_argument('-lbc','--lbc_csv', type=str, default='../../data/Lbc/achat/')
+    parser.add_argument('-o','--output', type=str, default='../input/')
+    parser.add_argument('-w','--workers', type=int, default=multiprocessing.cpu_count()-1)
+    parser.add_argument('-v','--verbose', action='store_true')
     args = parser.parse_args()
 
     run(args)
