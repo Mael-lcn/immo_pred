@@ -11,6 +11,9 @@ import math
 
 
 rename_dict_lbc = {
+    "id": "id",
+    "titre": "titre",
+    "type_bien": "property_type",
     "etat_bien": "property_status",
     "prix": "price",
     "ville": "city",
@@ -26,7 +29,7 @@ rename_dict_lbc = {
     "surface_habitable": "living_area_sqm",
     "surface_totale_terrain": "total_land_area_sqm",
     "nb_etages_Immeuble": "building_num_floors",
-    "nb_etages_Appartement": "apartment_floor_number",
+    #"nb_etages_Appartement": "apartment_floor_number",
     "prix_metre_carre": "price_per_sqm",
     "annee_construction": "year_built",
     "specificites": "features",
@@ -37,6 +40,7 @@ rename_dict_lbc = {
 
 
 rename_dict_sl = {
+    "id": "id",
     "legacyTracking_price": "price",
     "rawData_propertyType": "property_type",
     "mainDescription_headline": "title",
@@ -70,10 +74,14 @@ def worker(list_csv, output_dir, rename_dict):
 
             # Select les colonnes à garder
             final_cols_list = [c for c in colonnes_cibles if c in df.columns]
+
+
             df_final = df[final_cols_list]
 
+            df_final.set_index('id', inplace=True)
+
             output_file = os.path.join(output_dir, os.path.basename(csv_path))
-            df_final.to_csv(output_file,sep=";", index=False)
+            df_final.to_csv(output_file,sep=";", index=True)
 
             per_file.append((os.path.basename(csv_path), set(df_final.columns.tolist())))
         except Exception as e:

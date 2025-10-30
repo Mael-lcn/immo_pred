@@ -47,8 +47,6 @@ def filtre(df):
     df = df.drop(columns=empty_cols)
     stats["empty_removed"] = len(empty_cols)
 
-    # Réinitialiser index
-    df = df.reset_index(drop=True)
     stats["final_rows"] = len(df)
 
     return df, stats
@@ -133,7 +131,7 @@ def run(args):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-i', '--input', type=str, default='input/LBC')
-    parser.add_argument('-o', '--output', type=str, default='output/')
+    parser.add_argument('-o', '--output', type=str, default='output/csv')
     parser.add_argument('-w', '--workers', type=int, default=multiprocessing.cpu_count()-1)
     args = parser.parse_args()
 
