@@ -15,6 +15,7 @@ rename_dict_lbc = {
     "titre": "titre",
     "type_bien": "property_type",
     "etat_bien": "property_status",
+    "nom_vendeur": "seller_name",
     "prix": "price",
     "ville": "city",
     "region": "region",
