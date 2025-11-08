@@ -7,3 +7,4 @@
 tmp
 dataset/images_process/sam_vit_h_4b8939.pth
 dataset/images_process/yolov8n.pt
+util.txt
