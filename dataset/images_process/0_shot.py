@@ -1,20 +1,19 @@
 import argparse
-import os, gc
+import os
 import platform
 import pandas as pd
-import numpy as np
 import cv2
 
 import torch
 import torch.nn as nn
 from torch.amp import autocast
 
-from transformers import Blip2Processor, Blip2ForConditionalGeneration
+from transformers import Blip2ForConditionalGeneration, Blip2Processor
 
 
 
 # ---------------- utilitaires ----------------
-def format_bytes(num_bytes: int) -> str:
+def format_bytes(num_bytes):
     for unit in ["B", "KB", "MB", "GB", "TB"]:
         if num_bytes < 1024:
             return f"{num_bytes:.2f} {unit}"
@@ -28,13 +27,16 @@ def system_info():
     print(f"PyTorch: {torch.__version__}")
     print(f"CUDA disponible: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-        print(f"Capacité mémoire totale: {format_bytes(torch.cuda.get_device_properties(0).total_memory)}")
-        print(f"is_bf16_supported: {torch.cuda.is_bf16_supported()}")
+        try:
+            print(f"GPU: {torch.cuda.get_device_name(0)}")
+            print(f"Capacité mémoire totale: {format_bytes(torch.cuda.get_device_properties(0).total_memory)}")
+            print(f"is_bf16_supported: {torch.cuda.is_bf16_supported()}")
+        except Exception:
+            pass
     print("===============================")
 
 
-def gpu_memory(label: str):
+def gpu_memory(label):
     if torch.cuda.is_available():
         mem_used = torch.cuda.memory_allocated(0)
         mem_reserved = torch.cuda.memory_reserved(0)
@@ -58,11 +60,10 @@ def load_images(img_dir):
 
 def prepare_input(csv_path, img_base_dir):
     dt = pd.read_csv(csv_path, sep=";", quotechar='"')
-    # supprime des colonnes si elles existent (adapte selon ton CSV)
-    for col in ['images', 'price']:
-        if col in dt.columns:
-            dt.drop(columns=[col], inplace=True)
+    dt.drop(columns=['images', 'price'], inplace=True)
+    dt = dt[:10]
     return {str(r['id']): load_images(os.path.join(img_base_dir, str(r['id']))) for _, r in dt.iterrows()}, dt
+
 
 
 # ---------------- modules ----------------
@@ -82,7 +83,6 @@ class ImageFusionTransformer(nn.Module):
 
 
 class MultiModalMLP(nn.Module):
-    """Trois branches (img, text, tab) -> concat -> final head (2 sorties)."""
     def __init__(self, img_dim, text_dim, tab_dim, hidden=512):
         super().__init__()
         self.img_fc = nn.Sequential(nn.Linear(img_dim, hidden), nn.ReLU())
@@ -101,122 +101,111 @@ class MultiModalMLP(nn.Module):
         return self.head1(h), self.head2(h)
 
 
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-csv", "--csv_file", type=str, default="../output/csv/annonces_annonces_Auvergne-Rho╠éne-Alpes_0.csv_0.csv")
+    parser.add_argument("-csv", "--csv_file", type=str, default="../output/csv/annonces_annonces_Auvergne-Rhone-Alpes_0_csv_0.csv")
     parser.add_argument("-i", "--image_dir", type=str, default="../output/images")
     parser.add_argument("--model_id", type=str, default="Salesforce/blip2-flan-t5-xl")
     args = parser.parse_args()
 
     system_info()
-    final_device = torch.device("cuda")
-    print(f"[INFO] Device: {final_device}")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[INFO] Device: {device}")
 
-    # --- Préparation des données ---
     data_dict, dt = prepare_input(args.csv_file, args.image_dir)
     text_cols = [c for c in dt.columns if dt[c].dtype == 'object' and c not in ['id']]
     num_cols = [c for c in dt.columns if dt[c].dtype in ['float64', 'int64', 'float32', 'int32']]
+    tab_dim = max(1, len(num_cols))
 
-    # --- Charger le modèle BLIP2 (torch_dtype si bf16 supporté) ---
     use_bf16 = torch.cuda.is_bf16_supported()
+    dtype_load = torch.bfloat16 if use_bf16 else torch.float32
+    dtype_for_autocast = torch.bfloat16 if use_bf16 else torch.float32
+
+    print("[INFO] Chargement BLIP-2 (device_map='auto')...")
     model = Blip2ForConditionalGeneration.from_pretrained(
-        args.model_id,
-        device_map={"": "cuda"},
-        dtype=torch.bfloat16 if use_bf16 else None,
-    )
+        args.model_id, device_map="auto",
+        dtype=dtype_load)
+
     model.eval()
     processor = Blip2Processor.from_pretrained(args.model_id, use_fast=True)
 
-    vision = model.vision_model
-    text_encoder = model.get_encoder()
-
-    # s'assurer que les sous-modules sont sur GPU
-    vision.to(final_device)
-    text_encoder.to(final_device)
-
-    # on supprime la référence globale pour libérer mémoire si pas utilisé
-    del model
-    gc.collect()
-    torch.cuda.empty_cache()
-
-    # Freeze les poids
-    for p in vision.parameters():
+    # freeze vision/qformer
+    for p in model.vision_model.parameters():
         p.requires_grad = False
-    for p in text_encoder.parameters():
+    for p in model.qformer.parameters():
         p.requires_grad = False
+    if hasattr(model, "qformer_projector"):
+        for p in model.qformer_projector.parameters():
+            p.requires_grad = False
+    if hasattr(model, "text_projection"):
+        try:
+            for p in model.text_projection.parameters():
+                p.requires_grad = False
+        except Exception:
+            pass
 
-    img_feat_dim = vision.config.hidden_size
-    text_feat_dim = getattr(text_encoder.config, "hidden_size", img_feat_dim)
-    tab_dim = max(1, len(num_cols))
+    # --- Dimensions embeddings ---
+    dummy_pixel = torch.zeros(1, 3, 224, 224).to(device)
+    img_feat_model_dim = model.get_image_features(dummy_pixel).shape[-1]
+    img_feat_dim = 768  # dimension fusion/MLP
+    text_feat_dim = model.text_projection.out_features if hasattr(model, "text_projection") else img_feat_dim
 
-    # --- Instanciation downstream modules (float32) ---
-    fusion_transformer = ImageFusionTransformer(img_feat_dim).to(final_device).eval()
-    multimodal_mlp = MultiModalMLP(img_feat_dim, text_feat_dim, tab_dim, hidden=512).to(final_device).eval()
+    # projection pour harmonisation
+    img_proj = nn.Linear(img_feat_model_dim, img_feat_dim).to(device).eval()
+
+    # downstream modules sur GPU
+    fusion_transformer = ImageFusionTransformer(img_feat_dim).to(device).eval()
+    multimodal_mlp = MultiModalMLP(img_feat_dim, text_feat_dim, tab_dim, hidden=512).to(device).eval()
 
     print(f"[INFO] dims img:{img_feat_dim} text:{text_feat_dim} tab:{tab_dim}")
     gpu_memory("après init")
-
-    # --- Boucle d'inférence ---
-    dtype_for_autocast = torch.bfloat16 if use_bf16 else torch.float16
     print(f"[INFO] using autocast dtype: {dtype_for_autocast}")
 
-    for idx, row in dt.iterrows():
+    # --- Boucle inference ---
+    for _, row in dt.iterrows():
         id_str = str(row['id'])
         images = data_dict.get(id_str, [])
         if len(images) == 0:
             continue
 
-        # Encodage inputs (CPU -> on les envoie sur GPU)
+        # --- Prépare images ---
         img_inputs = processor(images=images, return_tensors="pt", padding=True)
-        img_inputs = {k: v.to(final_device) for k, v in img_inputs.items()}
+        pixel_values = img_inputs['pixel_values'].to(device)
 
+        # Text
         text_data = " | ".join([str(row.get(c, "")) for c in text_cols if c in row.index]) if len(text_cols) > 0 else ""
-        text_inputs = processor(text=text_data, return_tensors="pt", padding=True)
-        text_inputs = {k: v.to(final_device) for k, v in text_inputs.items()}
+        text_inputs = processor(text=text_data, return_tensors="pt", padding=True, truncation=True)
 
-        # numeric features -> keep float32 (autocast handles mixing)
-        num_vals = []
-        for c in num_cols:
-            try:
-                v = row.get(c, 0.0)
-                num_vals.append(float(v))
-            except Exception:
-                num_vals.append(0.0)
-        if len(num_vals) == 0:
-            num_array = np.zeros((tab_dim,), dtype=np.float32)
-        else:
-            num_array = np.asarray(num_vals, dtype=np.float32)
-        num_feats = torch.from_numpy(num_array).unsqueeze(0).to(device=final_device, dtype=torch.float32)
+        # --- Features numériques ---
+        num_vals = [float(row.get(c, 0.0)) for c in num_cols] if num_cols else [0.0]*tab_dim
+        num_feats = torch.tensor(num_vals, dtype=torch.float32, device=device).unsqueeze(0)
 
-        # Inference sous autocast (bf16 si supporté)
+        # --- Extraction features ---
         with torch.no_grad():
-            with autocast('cuda', dtype=dtype_for_autocast):
-                # vision forward
-                vision_out = vision(pixel_values=img_inputs['pixel_values'])
-                per_image_vecs = vision_out.last_hidden_state.mean(dim=1)  # (N_images, dim)
+            # GPU: images
+            with autocast(device_type='cuda', dtype=dtype_for_autocast):
+                image_feats = model.get_image_features(pixel_values=pixel_values)
+                per_image_vecs = image_feats.mean(dim=1)
+                tokens_for_fusion = img_proj(per_image_vecs).unsqueeze(0)
+                img_global = fusion_transformer(tokens_for_fusion).to(dtype=torch.float32)
 
-                # fusion expects batch first dimension = 1 (tu fais per_image_vecs.unsqueeze(0) dans ton code)
-                tokens_for_fusion = per_image_vecs.unsqueeze(0).to(final_device)  # autocast takes care of dtype
+            # Texte
+            try:
+                text_feats = model.get_text_features(**text_inputs)
+                text_embeds = text_feats.to(device=device, dtype=torch.float32)
+            except Exception:
+                text_embeds = torch.zeros((1, text_feat_dim), device=device, dtype=torch.float32)
 
-                # fusion
-                img_global = fusion_transformer(tokens_for_fusion)  # if fusion_transformer has ops that prefer fp32, autocast will keep them
+            # Forward downstream
+            out1, out2 = multimodal_mlp(img_global, text_embeds, num_feats)
 
-                # text forward
-                text_out = text_encoder(**text_inputs).last_hidden_state
-                text_embeds = text_out.mean(dim=1).to(final_device)
-
-                # optionally ensure shapes/dtypes are consistent (autocast handled dtype)
-                # forward downstream
-                out1, out2 = multimodal_mlp(img_global, text_embeds, num_feats)
-
-        # quick sanity checks
         if torch.isnan(out1).any() or torch.isnan(out2).any():
-            print(f"[ERROR] NaN detected for id={id_str} — consider running a float32 debug run")
-            # you can break or continue depending on how you want to handle it
+            print(f"[ERROR] NaN detected for id={id_str}")
             continue
 
-        print(f"[OUTPUT] id={id_str} Prix 1: {float(out1.item()):.2f} | Prix 2: {float(out2.item()):.2f}")
+        print(f"[OUTPUT] id={id_str} Prix vente: {float(out1.item()):.2f} | Prix location: {float(out2.item()):.2f}")
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
