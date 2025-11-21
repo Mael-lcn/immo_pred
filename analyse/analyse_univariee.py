@@ -1,0 +1,229 @@
+# 1. Importation de pandas
+import pandas as pd
+import matplotlib.pyplot as plt
+from outils import get_variable_types,explode_multilabel_column,charger_fichier,clean_outliers
+import argparse
+import math
+import numpy as np
+
+# appliquer des derniers filtres  plus tard (viager, type Appartement, et explique pourquoi on a besoin de les enlever) => crée des anomalies statistiques meme en retirant les outliers trop important
+# trouver un moyen sympa d'analyser les colonnes geographiques (lat,long), une plus-value à region,ville
+
+def affiche_caracteristique_par_defaut(df):
+    #Objectif: décrire simplement le jet de donnée
+    print("\nColonnes présentes dans le fichier :")
+    print(df.columns.tolist())
+
+    # Colonnes quantitatives (par defaut)
+    colonnes_quanti = df.select_dtypes(include=["number"]).columns.tolist()
+
+    # Colonnes qualitatives (par defaut)
+    colonnes_quali = df.select_dtypes(exclude=["number"]).columns.tolist()
+
+    
+    print(" Variables quantitatives :")
+    print(colonnes_quanti)
+
+    print("\n🔤 Variables qualitatives :")
+    print(colonnes_quali)
+
+    print("Aperçu du jeu de données :")
+    print(df.head())
+
+    print("\nInformations générales :")
+    print(df.info())
+ 
+    # 6. Statistiques descriptives pour les variables numériques
+    print("\nStatistiques descriptives :")
+    print(df.describe())
+
+
+def stats_univariees(df,low=0.1,high=0.99): # Les stats varient en fonction de l'élimination des outliers, les paramètres sont donc personnalisables
+
+    #les variables numériques 
+
+    num_cols,cat_cols = get_variable_types(df)
+    df_clean = clean_outliers(df, num_cols, low=low, high=high)
+
+    desc_num = df_clean[num_cols].describe().T
+    desc_num["skew"] = df_clean[num_cols].skew() # on regarde l'asymétrie
+    desc_num["kurtosis"] = df_clean[num_cols].kurt() # ici l'aplatissement
+    print("\n=== Statistiques descriptives (numériques) ===")
+    print(desc_num)
+
+    
+    print("\n=== Statistiques descriptives (catégorielles) ===")
+    for col in cat_cols:
+        print(f"\nVariable : {col}")
+        print(df[col].value_counts(dropna=False))
+        # pour le comptage des variables  acces_exterieur et specifities, ce serait peut être intéressant de faire un plot du nombre de d'acces exterieurs et de specifities, avec la moyenne ,ecarts types , outliers, ....
+        # faudra créer un bloc spécifique pour analyser ces 2 variables
+
+
+
+def detect_outliers_iqr(df, q1=0.1,q3=0.99):
+    # petit retour : Les prix ont enormément d'outliers  et c'est normal, il faudra peut être mettre des quantiles spécifiques à eux (0.5,0.95 par exemple) ou log + detect outliers 
+    # il y a un outlier surprenant, sur l'année de construction, ce sont des professionels qui ont enregistré l'annonce, on s'attenderait pas à voir des -2300 ou 4000.
+    num_cols= get_variable_types(df)[0]
+    outlier_summary = {}
+
+    for col in num_cols:
+        Q1 = df[col].quantile(q1)
+        Q3 = df[col].quantile(q3)
+        IQR = Q3 - Q1
+        lower = Q1 - 1.5 * IQR
+        upper = Q3 + 1.5 * IQR
+        mask = (df[col] < lower) | (df[col] > upper)
+        outlier_summary[col] = mask.sum()
+
+    print(f"\n=== Outliers (méthode IQR), quantiles pris : ({q1},{q3})===")
+    for col, nb in outlier_summary.items():
+        print(f"{col} : {nb} outliers")
+
+    
+
+def check_data_quality(df):
+    print("\n=== Valeurs manquantes par colonne ===")
+    missing = df.isna().sum()
+    missing = missing[missing > 0].sort_values(ascending=False)
+    print(missing)
+
+    print("\n=== Doublons ===")
+    print(df.duplicated().sum())
+
+
+def showBoxPlots(df,low=0.01,high=0.99):
+    num_cols= get_variable_types(df)[0]
+    # Creation des box plots pour chaque variable numérique
+
+    df_clean = clean_outliers(df, num_cols,low, high)
+
+
+    for col in num_cols:
+        print(df[col])
+        plt.figure(figsize=(6, 4))
+        plt.boxplot(df_clean[col].dropna())
+        plt.title(f"Boxplot de {col}")
+        plt.ylabel(col)
+        plt.grid(True)
+        plt.show()
+        plt.close()
+
+
+#montre les histogrammes des varaibles numériques
+def showHistoPlots(df,low=0.01,high=0.99):
+
+    num_cols= get_variable_types(df)[0]
+    df_clean = clean_outliers(df, num_cols,low, high)
+
+
+    for col in num_cols:
+        plt.figure(figsize=(6,4))
+        plt.hist(df_clean[col].dropna(), bins='auto')
+        plt.title(f"Histogramme de {col}")
+        plt.xlabel(col)
+        plt.ylabel("Fréquence")
+        plt.grid(True)
+        plt.show()
+        plt.close()
+
+def showCatPlots(df, max_categories=20): # je limite le nombre de categorie pour une variable car si y'en a trop c'est plus representable par un plot 
+    # Variables catégorielles
+    cat_cols = get_variable_types(df)[1]
+
+    # Colonnes à ignorer (trop de modalités)
+    filtres_supplementaires = [
+        "specificites",
+        "acces_exterieur",
+        "ville",
+        "nom_vendeur"
+    ]
+    
+    # On retire les colonnes ignorées
+    cat_cols = [c for c in cat_cols if c not in filtres_supplementaires]
+
+    if len(cat_cols) == 0:
+        print("Aucune colonne catégorielle à afficher.")
+        return
+
+    for col in cat_cols:
+        plt.figure(figsize=(8, 4))
+
+        vc = df[col].value_counts(dropna=False)
+
+        # Si trop de catégories, on montre juste le top
+        if vc.shape[0] > max_categories:
+            vc = vc.head(max_categories)
+
+        vc.plot(kind="bar")
+
+        plt.title(col)
+        plt.ylabel("Effectif")
+        plt.xticks(rotation=45, ha="right")
+
+        plt.tight_layout()
+        plt.show()
+
+def plot_multilabel_counts(df, col, sep, top=20):
+    d = explode_multilabel_column(df, col, sep)
+    counts = d.sum().sort_values(ascending=False).head(top)
+
+    plt.figure(figsize=(8, 4 + 0.2*top))
+    counts.plot(kind='barh')
+    plt.title(f"Top {top} valeurs de {col}")
+    plt.xlabel("Nombre d'annonces")
+    plt.gca().invert_yaxis()
+    plt.tight_layout()
+    plt.show()
+
+"""
+1er tentative pour analyser les variables multimodales (acces exterieurs et specificities)
+def showAccessExterieurPlot(df):
+    plot_multilabel_counts(df, "acces_exterieur", sep=",", top=20)
+
+
+def showSpecifitiesPlot(df):
+    plot_multilabel_counts(df, "specificites", sep="|", top=20)
+"""
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Analyse univariée d’un fichier CSV."
+    )
+    parser.add_argument(
+        "-f", "--file",
+        type=str,
+        required=True,
+        help="Chemin vers le fichier CSV à analyser."
+    )
+    parser.add_argument(
+        "-w", "--workers",
+        type=int,
+        default=1,
+        help="Nombre de processus à utiliser (optionnel)."
+    )
+
+    args = parser.parse_args()  
+    df = charger_fichier(args.file)
+    detect_outliers_iqr(df)
+    stats_univariees(df)
+    
+    #affiche_caracteristique_par_defaut(df)
+    #check_data_quality(df)
+    #showCatPlots(df)
+    showBoxPlots(df)   
+    #showHistoPlots(df)
+
+    #showAccessExterieurPlot(df)
+    #showSpecifitiesPlot(df)     // c'est des versions pas aboutis
+
+     
+
+
+
+
+# Point d'entrée
+if __name__ == "__main__":
+    main()
+
