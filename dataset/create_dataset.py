@@ -14,7 +14,6 @@ rename_dict = {
     "titre": "titre",
     "type_bien": "property_type",
     "etat_bien": "property_status",
-    #"nom_vendeur": "seller_name",
     "prix": "price",
     "ville": "city",
     "region": "region",
@@ -34,7 +33,6 @@ rename_dict = {
     "specificites": "features",
     "images_urls": "images",
     "description": "description",
-    #"reference": "reference"
 }
 
 colonnes_cibles = list(rename_dict.values())
