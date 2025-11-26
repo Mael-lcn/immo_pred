@@ -26,6 +26,7 @@ class TabularProjector(nn.Module):
         )
         self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim))
 
+
     def forward(self, x):
         feat = self.proj(x).unsqueeze(1)
         return feat + self.cls_token 

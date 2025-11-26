@@ -31,6 +31,8 @@ class MaskedLogMSELoss(nn.Module):
         loss = self.mse(preds, targets) * masks
         return loss.sum() / (masks.sum() + 1e-8)
 
+
+
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[INFO] Device: {device}")
@@ -56,8 +58,8 @@ def main():
     # --- ASTUCE BIAIS LOG ---
     # On force la sortie à démarrer autour de 12.5 (Vente) et 7.0 (Loc)
     print("[INFO] Initializing Bias for Log Space...")
-    # TO DO init avec log mean des biens pour etre prrécis
-    model.head_price[-1].bias.data.fill_(12.5) 
+    # TO DO init avec log mean des biens pour etre précis
+    model.head_price[-1].bias.data.fill_(12.5)
     model.head_rent[-1].bias.data.fill_(7.0)
 
     optimizer = optim.AdamW(model.parameters(), lr=LR)
