@@ -12,26 +12,26 @@ import csv
 rename_dict = {
     "id": "id",
     "titre": "titre",
-    "type_bien": "property_type",
+    "type_bien": "property_type", 
     "etat_bien": "property_status",
     "prix": "price",
     "ville": "city",
     "region": "region",
     "codePostal": "postal_code",
     "departement": "department",
-    "nb_pieces": "num_rooms",
-    "nb_chambres": "num_bedrooms",
-    "nb_salleDeBains": "num_bathrooms",
-    "classe_energetique": "energy_rating",
-    "orientation": "orientation",
-    "nb_placesParking": "num_parking_spaces",
-    "surface_habitable": "living_area_sqm",
-    "surface_tolale_terrain": "total_land_area_sqm",
-    "nb_etages_Immeuble": "building_num_floors",
-    "prix_metre_carre": "price_per_sqm",
-    "annee_construction": "year_built",
-    "specificites": "features",
-    "images_urls": "images",
+    "nb_pieces": "num_rooms", #entre 1 et 100 
+    "nb_chambres": "num_bedrooms", #entre 1 et 80
+    "nb_salleDeBains": "num_bathrooms", #entre 0 et 50
+    "classe_energetique": "energy_rating", # A-> F
+    "orientation": "orientation", #points cardinaux 
+    "nb_placesParking": "num_parking_spaces", # entre 0 et 50
+    "surface_habitable": "living_area_sqm", #entre 10 et 850
+    "surface_tolale_terrain": "total_land_area_sqm", #entre 0 et 8e5
+    "nb_etages_Immeuble": "building_num_floors",  #entre 0 et 33
+    "prix_metre_carre": "price_per_sqm", # entre 200 et 50000
+    "annee_construction": "year_built", # entre 1700 et 2025
+    "specificites": "features", 
+    "images_urls": "images", #+ que le nombres de pieces 
     "description": "description",
 }
 
