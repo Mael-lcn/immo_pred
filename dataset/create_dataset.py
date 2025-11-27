@@ -29,7 +29,6 @@ rename_dict = {
     "surface_habitable": "living_area_sqm", 
     "surface_tolale_terrain": "total_land_area_sqm", 
     "nb_etages_Immeuble": "building_num_floors", 
-    "prix_metre_carre": "price_per_sqm", 
     "annee_construction": "year_built", 
     "specificites": "features", 
     "images_urls": "images", 
@@ -38,162 +37,200 @@ rename_dict = {
 
 colonnes_cibles = list(rename_dict.values())
 
+# --- RÈGLES DE FILTRAGE ---
+RULES_COMMON = {
+    "num_bathrooms": (1, 20),
+    "num_parking_spaces": (0, 50),
+    "price_per_sqm": (200, 60000),
+    "year_built": (1600, 2025)
+}
 
-def filtre(df):
-    """
-    Nettoie le DataFrame :
-      - Filtre les plages numériques (supprime ce qui n'est pas un nombre standard).
-      - Convertit en INT.
-      - Filtre la classe énergétique et les images.
-      - PAS de conversion de texte ("deux" -> 2).
-    """
-    if df is None or df.empty:
-        return df
+RULES_APPART = {
+    "num_rooms": (1, 20),
+    "num_bedrooms": (1, 15),
+    "living_area_sqm": (10, 600),
+    "total_land_area_sqm": (0, 1000),
+    "building_num_floors": (0, 35)
+}
 
-    # 1.Gestion des valeurs par défaut
-    df["total_land_area_sqm"] = df["total_land_area_sqm"].fillna(0)
-    df["num_parking_spaces"] = df["num_parking_spaces"].fillna(0)
+RULES_MAISON = {
+    "num_rooms": (1, 50),
+    "num_bedrooms": (1, 30),
+    "living_area_sqm": (20, 1500),
+    "total_land_area_sqm": (0, 800000),
+    "building_num_floors": (0, 4)
+}
 
-    # 2. Drop les lignes contenants NaN
-    df = df.dropna()
 
-    # 3. Filtrage numérique
-    numeric_rules = {
-        "num_rooms": (1, 100),
-        "num_bedrooms": (1, 80),
-        "num_bathrooms": (0, 50),
-        "num_parking_spaces": (0, 50),
-        "living_area_sqm": (10, 850),
-        "total_land_area_sqm": (0, 800000),
-        "building_num_floors": (0, 33),
-        "price_per_sqm": (200, 50000),
-        "year_built": (1700, 2025)
-    }
-
-    for col, (mini, maxi) in numeric_rules.items():
+def apply_rules(df, rules):
+    for col, (mini, maxi) in rules.items():
         if col in df.columns:
             s_numeric = pd.to_numeric(df[col], errors='coerce')
-
-            # Masque : on garde seulement les nombres valides dans la plage
             mask = s_numeric.between(mini, maxi)
-            df = df[mask]
-
-            # Conversion finale en INT
-            df[col] = df[col].astype(int)
-
-    # 4. Classe énergétique
-    valid_ratings = ['A', 'B', 'C', 'D', 'E', 'F']
-    df["energy_rating"] = df["energy_rating"].astype(str).str.upper().str.strip()
-    df = df[df["energy_rating"].isin(valid_ratings)]
-
-    # 5. Images vs pièces
-    images_str = df['images'].astype(str)
-    num_images = images_str.str.count(r'\|') + (images_str != '').astype(int)
-    df = df[num_images >= df['num_rooms']]
-
-    # 6. Finalisation
-    df = df.drop_duplicates(ignore_index=True)
-    df = df.reset_index(drop=True)
-
+            df = df[mask].copy()
+            df[col] = df[col].astype(float).astype(int)
     return df
 
 
+def filtre(df):
+    if df is None or df.empty:
+        return df
 
-def worker(csv_path, output_dir):
+    # Nettoyage de base
+    df = df.dropna(subset=['property_type'])
+    df["total_land_area_sqm"] = df["total_land_area_sqm"].fillna(0)
+    df["num_parking_spaces"] = df["num_parking_spaces"].fillna(0)
+    df = df.dropna()
+
+    # Règles communes
+    df = apply_rules(df, RULES_COMMON)
+    if df.empty: return df
+
+    # Séparation Appart / Maison
+    type_series = df['property_type'].astype(str).str.lower()
+    mask_appart = type_series.str.contains('appartement')
+    mask_maison = type_series.str.contains('maison')
+
+    df_appart = df[mask_appart].copy()
+    df_maison = df[mask_maison].copy()
+
+    # Règles spécifiques
+    df_appart = apply_rules(df_appart, RULES_APPART)
+    df_maison = apply_rules(df_maison, RULES_MAISON)
+
+    # Fusion
+    df_final = pd.concat([df_appart, df_maison], ignore_index=True)
+    if df_final.empty: return df_final
+
+    # Filtres finaux (DPE et Images)
+    valid_ratings = ['A', 'B', 'C', 'D', 'E', 'F']
+    df_final["energy_rating"] = df_final["energy_rating"].astype(str).str.upper().str.strip()
+    df_final = df_final[df_final["energy_rating"].isin(valid_ratings)]
+
+    images_str = df_final['images'].astype(str)
+    num_images = images_str.str.count(r'\|') + (images_str != '').astype(int)
+    df_final = df_final[num_images >= df_final['num_rooms']]
+
+    return df_final.drop_duplicates(ignore_index=True)
+
+
+def worker(data_package, output_dir):
     """
-    Traite un fichier CSV et retourne le nombre de lignes avant/après pour les stats.
+    data_package est un tuple : (chemin_du_fichier, type_source)
+    type_source vaut soit 'ACHAT' soit 'LOCATION'
     """
+    csv_path, source_type = data_package
+    
     try:
         # Lecture
-        df = pd.read_csv(csv_path, sep=";", quotechar='"', dtype=str)
-        
-        if df.empty:
-            return 0, 0
+        df = pd.read_csv(csv_path, sep=";", quotechar='"')
+        if df.empty: return source_type, 0, 0
 
         # Renommage
         df.rename(columns=rename_dict, inplace=True)
-
-        # Sélection des colonnes cibles uniquement
         cols_presentes = [c for c in colonnes_cibles if c in df.columns]
         df = df[cols_presentes]
 
         nb_avant = len(df)
-
-        # Application du filtre
+        
+        # Filtrage
         df_filtered = filtre(df)
-
+        
         nb_apres = len(df_filtered)
 
-        # Écriture
-        output_file = os.path.join(output_dir, os.path.basename(csv_path))
-        df_filtered.to_csv(output_file, sep=";", index=False, quoting=csv.QUOTE_MINIMAL)
+        # Écriture si données restantes
+        if nb_apres > 0:
+            # --- MODIFICATION ICI : Choix du sous-dossier ---
+            subfolder = 'achat' if source_type == 'ACHAT' else 'location'
+            
+            # On construit le chemin : output_dir/achat/fichier.csv
+            final_output_dir = os.path.join(output_dir, subfolder)
+            output_file = os.path.join(final_output_dir, os.path.basename(csv_path))
+            
+            df_filtered.to_csv(output_file, sep=";", index=False, quoting=csv.QUOTE_MINIMAL)
 
-        return nb_avant, nb_apres
+        return source_type, nb_avant, nb_apres
 
     except Exception as e:
-        print(f"[ERROR WORKER] {csv_path} : {e}\n")
-
-        return 0, 0
+        print(f"[ERROR] {csv_path} : {e}")
+        return source_type, 0, 0
 
 
 def run(args):
     t0 = time.monotonic()
+    
+    # Création des dossiers parents et enfants
     os.makedirs(args.output, exist_ok=True)
+    os.makedirs(os.path.join(args.output, 'achat'), exist_ok=True)
+    os.makedirs(os.path.join(args.output, 'location'), exist_ok=True)
 
-    csv_list = glob.glob(os.path.join(args.input, '*.csv'))
+    # 1. On crée une liste de tuples (Fichier, Type)
+    files_achat = [(f, 'ACHAT') for f in glob.glob(os.path.join(args.achat, '*.csv'))]
+    files_loc = [(f, 'LOCATION') for f in glob.glob(os.path.join(args.location, '*.csv'))]
 
-    if not csv_list:
-        print(f"[WARN] Aucun fichier CSV trouvé dans : {args.input}")
+    all_tasks = files_achat + files_loc
+
+    if not all_tasks:
+        print(f"[WARN] Aucun fichier CSV trouvé.")
         return
 
-    num_processes = min(args.workers, len(csv_list))
-    print(f"Traitement de {len(csv_list)} fichiers avec {num_processes} processus...")
+    num_processes = min(args.workers, len(all_tasks))
+    print(f"Traitement de {len(all_tasks)} fichiers ({len(files_achat)} Achat, {len(files_loc)} Location)...")
+
+    # Dictionnaire pour compter séparément
+    stats = {
+        'ACHAT': {'avant': 0, 'apres': 0},
+        'LOCATION': {'avant': 0, 'apres': 0}
+    }
 
     fun = partial(worker, output_dir=args.output)
 
-    # Variables globales pour le comptage
-    total_raw_rows = 0
-    total_clean_rows = 0
-
-    # Exécution parallèle
     with multiprocessing.Pool(processes=num_processes) as pool:
-        # On récupère les résultats (avant, apres) au fur et à mesure
-        for result in tqdm(pool.imap_unordered(fun, csv_list), total=len(csv_list)):
-            if result:
-                avant, apres = result
-                total_raw_rows += avant
-                total_clean_rows += apres
+        for source_type, avant, apres in tqdm(pool.imap_unordered(fun, all_tasks), total=len(all_tasks)):
+            stats[source_type]['avant'] += avant
+            stats[source_type]['apres'] += apres
 
     dt = time.monotonic() - t0
-    
-    # --- AFFICHAGE DU BILAN ---
-    print("\n" + "="*40)
-    print("BILAN DU NETTOYAGE")
-    print("="*40)
-    print(f"Fichiers traités     : {len(csv_list)}")
-    print(f"Lignes AVANT filtres : {total_raw_rows:,}".replace(",", " "))
-    print(f"Lignes APRES filtres : {total_clean_rows:,}".replace(",", " "))
-    
-    diff = total_raw_rows - total_clean_rows
-    percent = (diff / total_raw_rows * 100) if total_raw_rows > 0 else 0
-    
-    print(f"Lignes supprimées    : {diff:,} (-{percent:.2f}%)".replace(",", " "))
-    print("-" * 40)
-    print(f"Temps total          : {dt:.2f}s")
-    print(f"Dossier de sortie    : {args.output}")
-    print("="*40)
 
+    # --- AFFICHAGE DU TABLEAU COMPARATIF ---
+    print("\n" + "="*65)
+    print(f"{'SOURCE':<10} | {'AVANT':<12} | {'APRÈS':<12} | {'SUPPRIMÉS':<15}")
+    print("-" * 65)
+
+    tot_avant = 0
+    tot_apres = 0
+
+    for key in ['ACHAT', 'LOCATION']:
+        av = stats[key]['avant']
+        ap = stats[key]['apres']
+        suppr = av - ap
+        pct = (suppr / av * 100) if av > 0 else 0
+        
+        tot_avant += av
+        tot_apres += ap
+        
+        print(f"{key:<10} | {av:<12,} | {ap:<12,} | {suppr:<9,} (-{pct:.1f}%)".replace(",", " "))
+
+    print("-" * 65)
+    tot_suppr = tot_avant - tot_apres
+    tot_pct = (tot_suppr / tot_avant * 100) if tot_avant > 0 else 0
+    
+    print(f"{'TOTAL':<10} | {tot_avant:<12,} | {tot_apres:<12,} | {tot_suppr:<9,} (-{tot_pct:.1f}%)".replace(",", " "))
+    print("="*65)
+    print(f"Temps total : {dt:.2f}s")
+    print(f"Sortie Achat    : {os.path.join(args.output, 'achat')}")
+    print(f"Sortie Location : {os.path.join(args.output, 'location')}")
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('-i', '--input', type=str, default='../../data/Lbc/achat/')
+    parser.add_argument('-a', '--achat', type=str, default='../../data/achat/')
+    parser.add_argument('-l', '--location', type=str, default='../../data/location/')
     parser.add_argument('-o', '--output', type=str, default='../output/csv')
     parser.add_argument('-w', '--workers', type=int, default=max(1, multiprocessing.cpu_count()-1))
     args = parser.parse_args()
 
     run(args)
-
 
 if __name__ == '__main__':
     main()
