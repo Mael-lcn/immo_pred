@@ -54,6 +54,7 @@ class AdvancedRealEstateModel(nn.Module):
         with torch.no_grad():
             dummy = torch.randn(1, 3, 224, 224)
             img_out_dim = self.img_encoder(dummy).shape[-1]
+
         self.img_proj = nn.Linear(img_out_dim, fusion_dim)
 
         # 2. Expert TEXTE

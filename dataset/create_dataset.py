@@ -20,161 +20,120 @@ rename_dict = {
     "region": "region",
     "codePostal": "postal_code",
     "departement": "department",
-    "nb_pieces": "num_rooms", #entre 1 et 100 
-    "nb_chambres": "num_bedrooms", #entre 1 et 80
-    "nb_salleDeBains": "num_bathrooms", #entre 0 et 50
-    "classe_energetique": "energy_rating", # A-> F
-    "orientation": "orientation", #points cardinaux 
-    "nb_placesParking": "num_parking_spaces", # entre 0 et 50
-    "surface_habitable": "living_area_sqm", #entre 10 et 850
-    "surface_tolale_terrain": "total_land_area_sqm", #entre 0 et 8e5
-    "nb_etages_Immeuble": "building_num_floors",  #entre 0 et 33
-    "prix_metre_carre": "price_per_sqm", # entre 200 et 50000
-    "annee_construction": "year_built", # entre 1700 et 2025
+    "nb_pieces": "num_rooms", 
+    "nb_chambres": "num_bedrooms", 
+    "nb_salleDeBains": "num_bathrooms", 
+    "classe_energetique": "energy_rating", 
+    "orientation": "orientation", 
+    "nb_placesParking": "num_parking_spaces", 
+    "surface_habitable": "living_area_sqm", 
+    "surface_tolale_terrain": "total_land_area_sqm", 
+    "nb_etages_Immeuble": "building_num_floors", 
+    "prix_metre_carre": "price_per_sqm", 
+    "annee_construction": "year_built", 
     "specificites": "features", 
-    "images_urls": "images", #+ que le nombres de pieces 
+    "images_urls": "images", 
     "description": "description",
 }
 
 colonnes_cibles = list(rename_dict.values())
 
 
-
-# Un peu éclaté
 def filtre(df):
     """
-    Nettoie et transforme la DataFrame :
-      - Remplit total_land_area_sqm par 0 si présent
-      - Supprime les lignes contenant des valeurs NaN (après conversions nécessaires)
-      - Supprime les lignes où nb d'images < nb de pièces (images compte les '|' ; si champ vide => 0)
-      - Supprime les doublons
-      - Supprime les colonnes vides (toutes valeurs NaN ou '')
-      - Réinitialise l'index
-
-    Retourne : (df_nettoye, stats_dict)
+    Nettoie le DataFrame :
+      - Filtre les plages numériques (supprime ce qui n'est pas un nombre standard).
+      - Convertit en INT.
+      - Filtre la classe énergétique et les images.
+      - PAS de conversion de texte ("deux" -> 2).
     """
-    stats = {
-        "initial_rows": len(df) if df is not None else 0,
-        "final_rows": 0,
-        "na_removed": 0,
-        "dup_removed": 0,
-        "empty_removed": 0,
-        "images_removed": 0
+    if df is None or df.empty:
+        return df
+
+    # 1.Gestion des valeurs par défaut
+    df["total_land_area_sqm"] = df["total_land_area_sqm"].fillna(0)
+    df["num_parking_spaces"] = df["num_parking_spaces"].fillna(0)
+
+    # 2. Drop les lignes contenants NaN
+    df = df.dropna()
+
+    # 3. Filtrage numérique
+    numeric_rules = {
+        "num_rooms": (1, 100),
+        "num_bedrooms": (1, 80),
+        "num_bathrooms": (0, 50),
+        "num_parking_spaces": (0, 50),
+        "living_area_sqm": (10, 850),
+        "total_land_area_sqm": (0, 800000),
+        "building_num_floors": (0, 33),
+        "price_per_sqm": (200, 50000),
+        "year_built": (1700, 2025)
     }
 
-    if df is None or df.empty:
-        return df, stats
+    for col, (mini, maxi) in numeric_rules.items():
+        if col in df.columns:
+            s_numeric = pd.to_numeric(df[col], errors='coerce')
 
-    # --- Drop rows with any NaN (après conversions utiles)
-    before_dropna = len(df)
-    df = df.dropna()
-    stats["na_removed"] = before_dropna - len(df)
+            # Masque : on garde seulement les nombres valides dans la plage
+            mask = s_numeric.between(mini, maxi)
+            df = df[mask]
 
-    # --- Supprimer lignes où le nombre d'images < num_rooms
+            # Conversion finale en INT
+            df[col] = df[col].astype(int)
 
-    # images: compter '|' uniquement si la chaine non vide, sinon 0
-    images_str = df['images'].fillna('').astype(str)
+    # 4. Classe énergétique
+    valid_ratings = ['A', 'B', 'C', 'D', 'E', 'F']
+    df["energy_rating"] = df["energy_rating"].astype(str).str.upper().str.strip()
+    df = df[df["energy_rating"].isin(valid_ratings)]
+
+    # 5. Images vs pièces
+    images_str = df['images'].astype(str)
     num_images = images_str.str.count(r'\|') + (images_str != '').astype(int)
+    df = df[num_images >= df['num_rooms']]
 
-    # convertir num_rooms en int (valeurs non numériques deviennent NaN)
-    num_rooms_numeric = pd.to_numeric(df['num_rooms'])
-
-    # Pour la comparaison, si num_rooms est NaN on considère la ligne invalide -> on la supprimera (mask False)
-    mask_valid = num_rooms_numeric.notna()  # on garde seulement si num_rooms convertible
-    mask_images = (num_images >= num_rooms_numeric.fillna(-1))  # comparaison sécurisée
-
-    # Final mask : both valid num_rooms AND images >= num_rooms
-    final_mask = mask_valid & mask_images
-
-    images_removed_count = (~final_mask).sum()
-    stats["images_removed"] = int(images_removed_count)
-    df = df[final_mask]
-
-    # --- Doublons
-    before_dup = len(df)
+    # 6. Finalisation
     df = df.drop_duplicates(ignore_index=True)
-    stats["dup_removed"] = before_dup - len(df)
-
-    # --- Colonnes vides (toutes NaN ou toutes chaîne vide '')
-    empty_cols = []
-    for col in df.columns:
-        # si toute la colonne est NaN
-        if df[col].isna().all():
-            empty_cols.append(col)
-            continue
-        # ou toute la colonne est '', après cast en str (attention aux NaN déjà éliminés)
-        # utiliser astype(str) n'est pas idéal si valeurs NaN existent; on a déjà dropna
-        if (df[col].astype(str) == '').all():
-            empty_cols.append(col)
-
-    if empty_cols:
-        df = df.drop(columns=empty_cols)
-    stats["empty_removed"] = len(empty_cols)
-
-    # --- Final
     df = df.reset_index(drop=True)
-    stats["final_rows"] = len(df)
 
-    return df, stats
+    return df
+
 
 
 def worker(csv_path, output_dir):
     """
-    Traite un fichier CSV :
-      - lecture, renommage colonnes
-      - fillna(0) pour total_land_area_sqm et num_parking_spaces si présent
-      - filtrage via filtre()
-      - écrit CSV filtré et retourne stats (dict)
+    Traite un fichier CSV et retourne le nombre de lignes avant/après pour les stats.
     """
-    default_stats = {
-        "initial_rows": 0,
-        "final_rows": 0,
-        "na_removed": 0,
-        "dup_removed": 0,
-        "empty_removed": 0,
-        "images_removed": 0
-    }
-
     try:
+        # Lecture
         df = pd.read_csv(csv_path, sep=";", quotechar='"', dtype=str)
+        
         if df.empty:
-            return default_stats
+            return 0, 0
 
-        stats = {"initial_rows": len(df)}
-        # rename columns
+        # Renommage
         df.rename(columns=rename_dict, inplace=True)
 
-        # garder seulement colonnes cibles présentes
-        final_cols_list = [c for c in colonnes_cibles]
-        df = df[final_cols_list]
+        # Sélection des colonnes cibles uniquement
+        cols_presentes = [c for c in colonnes_cibles if c in df.columns]
+        df = df[cols_presentes]
 
-        # fillna seulement si colonnes présentes
-        df['total_land_area_sqm'] = pd.to_numeric(df['total_land_area_sqm'], errors='coerce').fillna(0)
-        df['num_parking_spaces'] = pd.to_numeric(df['num_parking_spaces'], errors='coerce').fillna(0)
+        nb_avant = len(df)
 
-        # Appliquer le filtre
-        df_filtered, filtre_stats = filtre(df)
+        # Application du filtre
+        df_filtered = filtre(df)
 
-        # Mettre à jour stats initiales
-        stats.update(filtre_stats)
+        nb_apres = len(df_filtered)
 
-        # Écrire le CSV filtré
-        try:
-            output_file = os.path.join(output_dir, os.path.basename(csv_path))
-            df_filtered.to_csv(output_file, sep=";", index=False, quoting=csv.QUOTE_MINIMAL)
-        except Exception as e:
-            error_file = os.path.join(output_dir, "erreur.txt")
-            with open(error_file, "a", encoding="utf-8") as f:
-                f.write(f"[ERROR WRITE] {csv_path} : {e}\n")
+        # Écriture
+        output_file = os.path.join(output_dir, os.path.basename(csv_path))
+        df_filtered.to_csv(output_file, sep=";", index=False, quoting=csv.QUOTE_MINIMAL)
+
+        return nb_avant, nb_apres
 
     except Exception as e:
-        error_file = os.path.join(output_dir, "erreur.txt")
-        with open(error_file, "a", encoding="utf-8") as f:
-            f.write(f"[ERROR READ] {csv_path} : {e}\n")
-        stats = default_stats
+        print(f"[ERROR WORKER] {csv_path} : {e}\n")
 
-    return stats
-
+        return 0, 0
 
 
 def run(args):
@@ -188,52 +147,48 @@ def run(args):
         return
 
     num_processes = min(args.workers, len(csv_list))
-    print(f"Traitement {len(csv_list)} fichiers -> {len(csv_list)} lots, processes={num_processes}")
+    print(f"Traitement de {len(csv_list)} fichiers avec {num_processes} processus...")
 
     fun = partial(worker, output_dir=args.output)
 
-    stats_global = {
-        "initial_rows": 0,
-        "final_rows": 0,
-        "na_removed": 0,
-        "dup_removed": 0,
-        "empty_removed": 0,
-        "images_removed": 0
-    }
+    # Variables globales pour le comptage
+    total_raw_rows = 0
+    total_clean_rows = 0
 
-    # Pool multiprocessing
+    # Exécution parallèle
     with multiprocessing.Pool(processes=num_processes) as pool:
-        for batch_stats in tqdm(pool.imap_unordered(fun, csv_list), total=len(csv_list)):
-            if not batch_stats:
-                continue
-            # batch_stats est un dict
-            for key in stats_global:
-                stats_global[key] += int(batch_stats.get(key, 0))
+        # On récupère les résultats (avant, apres) au fur et à mesure
+        for result in tqdm(pool.imap_unordered(fun, csv_list), total=len(csv_list)):
+            if result:
+                avant, apres = result
+                total_raw_rows += avant
+                total_clean_rows += apres
 
     dt = time.monotonic() - t0
-    print(f"\nTemps total: {dt:.2f}s. CSV filtrés écrits dans : {args.output}")
-
-    erreur_file = os.path.join(args.output, "erreur.txt")
-    if os.path.exists(erreur_file):
-        print(f"[WARN] Certaines erreurs ont été enregistrées dans : {erreur_file}")
-
-    # Résumé final
-    print("\n=== Résumé global du nettoyage ===")
-    print(f"Lignes initiales: {stats_global['initial_rows']}")
-    print(f"Lignes finales  : {stats_global['final_rows']}")
-    print(f"Lignes supprimées (NaN)   : {stats_global['na_removed']}")
-    print(f"Lignes supprimées (doublons) : {stats_global['dup_removed']}")
-    print(f"Colonnes vides supprimées     : {stats_global['empty_removed']}")
-    print(f"Lignes avec moins d'images que de pièces  : {stats_global['images_removed']}")
-    kept_pct = (stats_global['final_rows'] / stats_global['initial_rows'] * 100)
-    print(f"Pourcentage de données gardée : {kept_pct:.2f}%")
+    
+    # --- AFFICHAGE DU BILAN ---
+    print("\n" + "="*40)
+    print("BILAN DU NETTOYAGE")
+    print("="*40)
+    print(f"Fichiers traités     : {len(csv_list)}")
+    print(f"Lignes AVANT filtres : {total_raw_rows:,}".replace(",", " "))
+    print(f"Lignes APRES filtres : {total_clean_rows:,}".replace(",", " "))
+    
+    diff = total_raw_rows - total_clean_rows
+    percent = (diff / total_raw_rows * 100) if total_raw_rows > 0 else 0
+    
+    print(f"Lignes supprimées    : {diff:,} (-{percent:.2f}%)".replace(",", " "))
+    print("-" * 40)
+    print(f"Temps total          : {dt:.2f}s")
+    print(f"Dossier de sortie    : {args.output}")
+    print("="*40)
 
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('-i', '--input', type=str, default='../data/Lbc/achat/')
-    parser.add_argument('-o', '--output', type=str, default='output/csv')
+    parser.add_argument('-i', '--input', type=str, default='../../data/Lbc/achat/')
+    parser.add_argument('-o', '--output', type=str, default='../output/csv')
     parser.add_argument('-w', '--workers', type=int, default=max(1, multiprocessing.cpu_count()-1))
     args = parser.parse_args()
 
