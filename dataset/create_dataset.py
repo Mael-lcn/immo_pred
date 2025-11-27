@@ -120,7 +120,7 @@ def worker(data_package, output_dir):
     type_source vaut soit 'ACHAT' soit 'LOCATION'
     """
     csv_path, source_type = data_package
-    
+
     try:
         # Lecture
         df = pd.read_csv(csv_path, sep=";", quotechar='"')
@@ -140,13 +140,18 @@ def worker(data_package, output_dir):
 
         # Écriture si données restantes
         if nb_apres > 0:
-            # --- MODIFICATION ICI : Choix du sous-dossier ---
-            subfolder = 'achat' if source_type == 'ACHAT' else 'location'
-            
-            # On construit le chemin : output_dir/achat/fichier.csv
+            if source_type == 'ACHAT':
+                label_val = 0
+                subfolder = 'achat'
+            else:
+                label_val = 1
+                subfolder = 'location'
+
+            df_filtered['dataset_source'] = label_val
+
             final_output_dir = os.path.join(output_dir, subfolder)
             output_file = os.path.join(final_output_dir, os.path.basename(csv_path))
-            
+
             df_filtered.to_csv(output_file, sep=";", index=False, quoting=csv.QUOTE_MINIMAL)
 
         return source_type, nb_avant, nb_apres
@@ -222,6 +227,7 @@ def run(args):
     print(f"Sortie Location : {os.path.join(args.output, 'location')}")
 
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-a', '--achat', type=str, default='../../data/achat/')
@@ -231,6 +237,7 @@ def main():
     args = parser.parse_args()
 
     run(args)
+
 
 if __name__ == '__main__':
     main()
