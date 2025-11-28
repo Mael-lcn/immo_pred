@@ -1,340 +1,185 @@
 import os
+import csv
 import argparse
-import json
-import shutil
-
-from PIL import Image
-import numpy as np
-
+from pathlib import Path
+from multiprocessing import Pool, cpu_count
+from typing import List, Tuple
+from tqdm import tqdm
 import torch
-import torch.nn.functional as F
 
-import open_clip
-from sklearn.decomposition import PCA
-from sklearn.cluster import KMeans
-from transformers import AutoImageProcessor, AutoModel, BitsAndBytesConfig
+from ai_part import init_models, process_listing_from_bytes
 
 
 
-
-def list_images(folder):
+# -------------------------
+# worker: CPU-bound I/O reading images for a listing
+# returns list of (path, bytes)
+# -------------------------
+def read_listing_images_for_listing(task):
     """
-    Retourne la liste triée des chemins d'images dans `folder`.
-    Extensions reconnues : jpg, jpeg, png, bmp, webp, tiff.
+    task = (listing_id, images_dir)
+    returns (listing_id, [(path, bytes), ...])
     """
+    listing_id, images_dir = task
+    imgs = []
+    if not os.path.isdir(images_dir):
+        return listing_id, imgs
     exts = {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tiff'}
-    paths = []
-    for root, _, files in os.walk(folder):
-        for f in files:
-            if os.path.splitext(f)[1].lower() in exts:
-                paths.append(os.path.join(root, f))
-    return sorted(paths)
+    try:
+        for root, _, files in os.walk(images_dir):
+            for f in files:
+                if os.path.splitext(f)[1].lower() in exts:
+                    p = os.path.join(root, f)
+                    try:
+                        with open(p, "rb") as fh:
+                            b = fh.read()
+                        imgs.append((p, b))
+                    except Exception as e:
+                        print(f"[worker:{listing_id}] read fail {p}: {e}")
+    except Exception as e:
+        print(f"[worker:{listing_id}] os.walk fail: {e}")
+    return listing_id, imgs
 
 
 
-def load_clip_filter(device,
-                     model_name='ViT-B-32',
-                     pretrained='openai',
-                     threshold_indoor=0.22,
-                     threshold_bad=0.25,
-                     threshold_outdoor=0.25,
-                     debug=False):
-    """
-    Charge open_clip et renvoie les embeddings textes (outdoor / indoor / bad).
-    """
-
-    print(f"[load_clip_filter] device={device}, model={model_name}, pretrained={pretrained}")
-    model, _, preprocess = open_clip.create_model_and_transforms(model_name, pretrained=pretrained)
-    tokenizer = open_clip.get_tokenizer(model_name)
-    model = model.to(device).eval()
-
-    # Outdoor
-    outdoor_texts = [
-        "an outdoor scene", "a garden", "a backyard", "a street",
-        "a city street", "a building facade", "an exterior of a house", "an exterior",
-        "an empty lot", "a construction site", "a building plot", "a garden area",
-        "a yard under construction", "an open land", "a terrain", "a backyard garden",
-        "a landscaped garden", "a fenced land", "a vacant land"
-    ]
-    # Indoor
-    indoor_texts = [
-        "an indoor scene", "an interior", "a living room", "a bedroom", "a kitchen",
-        "an apartment interior", "a bathroom", "a hallway", "a dining room",
-    ]
-    # Junk (logo / plan / document)
-    bad_texts = [
-        "a logo", "company logo", "logo", "a floor plan", "a blueprint", "a map", "a watermark",
-        "a document", "a scanned document", "a document photo", "a screenshot", "a business card",
-        "a sign"
-    ]
-
-    with torch.no_grad():
-        tokens_out = tokenizer(outdoor_texts).to(device)
-        tokens_in = tokenizer(indoor_texts).to(device)
-        tokens_bad = tokenizer(bad_texts).to(device)
-
-        emb_out = model.encode_text(tokens_out).float()
-        emb_in = model.encode_text(tokens_in).float()
-        emb_bad = model.encode_text(tokens_bad).float()
-
-        emb_out /= emb_out.norm(dim=-1, keepdim=True)
-        emb_in /= emb_in.norm(dim=-1, keepdim=True)
-        emb_bad /= emb_bad.norm(dim=-1, keepdim=True)
-
-    return {
-        "model": model,
-        "preprocess": preprocess,
-        "tokenizer": tokenizer,
-        "emb_outdoor": emb_out,
-        "emb_indoor": emb_in,
-        "emb_bad": emb_bad,
-        "threshold_indoor": threshold_indoor,
-        "threshold_bad": threshold_bad,
-        "threshold_outdoor": threshold_outdoor,
-        "debug": debug,
-        "device": device
-    }
-
-
-def is_desired_image_clip(filter_obj, pil_image,
-                          margin_in=0.08, margin_out=0.06):
-    """
-    Décision améliorée :
-      - reject si bad dominant (max_bad > max_in + margin_in OR max_bad > threshold_bad)
-      - reject si outdoor dominant (max_out > max_in + margin_out OR max_out > threshold_outdoor)
-      - keep si indoor suffisamment fort (max_in > threshold_indoor OR max_in - max_out > margin_in)
-      - else reject
-    Retourne (keep: bool, sims: dict)
-    """
-    model = filter_obj["model"]
-    preprocess = filter_obj["preprocess"]
-    device = filter_obj["device"]
-    emb_in = filter_obj["emb_indoor"]
-    emb_out = filter_obj["emb_outdoor"]
-    emb_bad = filter_obj["emb_bad"]
-    t_in = filter_obj["threshold_indoor"]
-    t_bad = filter_obj["threshold_bad"]
-    t_out = filter_obj.get("threshold_outdoor", 0.25)
-    debug = filter_obj["debug"]
-
-    x = preprocess(pil_image).unsqueeze(0).to(device)
-    with torch.no_grad():
-        img_emb = model.encode_image(x).float()
-        img_emb /= img_emb.norm(dim=-1, keepdim=True)
-
-        sim_in = (img_emb @ emb_in.T).cpu().numpy().squeeze()
-        sim_out = (img_emb @ emb_out.T).cpu().numpy().squeeze()
-        sim_bad = (img_emb @ emb_bad.T).cpu().numpy().squeeze()
-
-    max_in = float(np.max(sim_in)) if getattr(sim_in, 'size', 1) > 0 else 0.0
-    max_out = float(np.max(sim_out)) if getattr(sim_out, 'size', 1) > 0 else 0.0
-    max_bad = float(np.max(sim_bad)) if getattr(sim_bad, 'size', 1) > 0 else 0.0
-
-    # 1) reject if clearly "bad"
-    if (max_bad > max_in + margin_in) or (max_bad > t_bad):
-        keep = False
-        reason = "bad"
-    # 2) reject if clearly outdoor
-    elif (max_out > max_in + margin_out) or (max_out > t_out):
-        keep = False
-        reason = "outdoor"
-    # 3) keep if clearly indoor
-    elif (max_in > t_in) or (max_in - max_out > margin_in):
-        keep = True
-        reason = "indoor"
-    else:
-        keep = False
-        reason = "uncertain"
-
-    sims = {"indoor": max_in, "outdoor": max_out, "bad": max_bad, "reason": reason}
-    if debug:
-        print(f"[is_desired_image_clip] sims={sims} -> keep={keep}")
-    return keep, sims
-
-
-
-def load_visual_model():
-    """
-    Charge DINOv3 en 8-bit via HF + bitsandbytes
-    Retourne : model, processor
-    """
-
-    model_id = 'facebook/dinov3-vits16-pretrain-lvd1689m'
-
-    quant_cfg = BitsAndBytesConfig(load_in_8bit=True)
-    processor = AutoImageProcessor.from_pretrained(model_id)
-    model = AutoModel.from_pretrained(model_id, quantization_config=quant_cfg, device_map="auto")
-    print("[load_visual_model] HF DINOv3 chargé en 8-bit (bitsandbytes).")
-
-    model.eval()
-    return model, processor
-
-
-def embed_image(model, processor, pil_image, device='cuda'):
-    """
-    Calcule et renvoie l'embedding d'une image PIL sous forme de vecteur numpy normalisé.
-    Comporte deux chemins clairs :
-      On utilise le pipeline HF (pixel_values -> model(**inputs))
-    """
-
-    device_t = torch.device(device)
-
-    # traitement HF (AutoModel) : construire dict d'inputs et envoyer chaque tensor sur device
-    inputs = processor(images=pil_image, return_tensors="pt")
-    # déplacer chaque tensor vers device
-    inputs = {k: v.to(device_t) for k, v in inputs.items()}
-
-    with torch.no_grad():
-        out = model(**inputs)
-
-    # extraire features : prefer pooler_output puis last_hidden_state.mean
-    feats = out.pooler_output
-
-    # garantir forme (B, D) puis normaliser
-    if feats.dim() > 2:
-        feats = feats.flatten(1)
-    feats = F.normalize(feats.float(), dim=-1)
-
-    return feats.cpu().numpy().squeeze()
-
-
-def run_pipeline(args, n_final=5, max_pca_components=16, clip_debug=False):
-    """
-    Exécute le pipeline complet :
-      1) Liste les images
-      2) Filtre via CLIP (garde seulement les vraies photos de pièces)
-      3) Embeddings visuels
-      4) PCA
-      5) KMeans + sélection d'un exemplaire par cluster
-    """
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    image_paths = list_images(args.input_dir)
-    print(f"Found {len(image_paths)} images")
-
-    device = 'cuda'
-
-    # 1) CLIP filter
-    clip_filter = load_clip_filter(device=device,
-                                   model_name=args.clip_model,
-                                   pretrained=args.clip_pretrained,
-                                   threshold_indoor=0.20,
-                                   threshold_bad=0.30,
-                                   debug=clip_debug)
-
-    # 2) filtrage images (on garde uniquement les vraies photos de pièces)
-    kept = []
-    for p in image_paths:
-        # lecture d'image (gestion d'erreurs de fichiers)
-        try:
-            img = Image.open(p).convert('RGB')
-        except Exception as e:
-            print(f"[run_pipeline] skip (cannot open): {p} -> {e}")
-            continue
-
-        keep, sims = is_desired_image_clip(clip_filter, img)
-        if keep:
-            kept.append(p)
-        elif clip_debug:
-            print(f"[run_pipeline] dropped {p} sims={sims}")
-
-    print(f"Kept {len(kept)} images after CLIP filtering")
-    if not kept:
-        print("No images left after filter. Exiting.")
+# -------------------------
+# orchestrator: main
+# -------------------------
+def process_all(csv_root, images_root, results_root, args):
+    # collect CSV files
+    csv_files = sorted(list(Path(csv_root, "achat").glob("*.csv")) + list(Path(csv_root, "location").glob("*.csv")))
+    if not csv_files:
+        print("Aucun CSV trouvé.")
         return
 
-    # 3) charger modèle visuel et faire embeddings
-    model, processor = load_visual_model()
+    # init models once (main process)
+    device = args.device if args.device != "auto" else ("cuda" if __import__("torch").cuda.is_available() else "cpu")
+    clip_cfg, model_vis, processor_vis = init_models(device=device,
+                                                    clip_hf_id=args.clip_hf_model,
+                                                    visual_id=args.visual_model)
 
-    embs = []
-    kept_imgs = []
-    for p in kept:
-        try:
-            img = Image.open(p).convert('RGB')
-        except Exception as e:
-            print(f"[run_pipeline] can't open for embed: {p} -> {e}")
-            continue
-        vec = embed_image(model, processor, img, device=device)
-        embs.append(vec)
-        kept_imgs.append(p)
+    # create pool for I/O tasks (num_workers ~ cpu_count - 1)
+    n_workers = max(1, min(args.num_workers, cpu_count()-1))
+    pool = Pool(processes=n_workers)
 
-    if len(embs) == 0:
-        print("No embeddings produced. Exiting.")
-        return
+    for csv_path in csv_files:
+        csv_base = Path(csv_path).stem
+        print(f"\n=== Processing CSV: {csv_path} -> bucket: {csv_base} ===")
+        results_csv_dir = Path(results_root) / csv_base
+        results_csv_dir.mkdir(parents=True, exist_ok=True)
 
-    embs = np.vstack(embs)
-    print(f"Computed embeddings for {len(embs)} images")
+        # read CSV rows
+        with open(csv_path, newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f, delimiter=';')
+            rows = list(reader)
 
-    # 4) PCA (nombre de composantes borné par n_samples et n_features)
-    n_samples, n_features = embs.shape[0], embs.shape[1]
-    n_components_pca = min(max_pca_components, n_features, n_samples)
-    n_components_pca = max(1, n_components_pca)
-    pca = PCA(n_components=n_components_pca)
-    embs_pca = pca.fit_transform(embs)
-    print(f"PCA done (n_components={n_components_pca}), retained var={pca.explained_variance_ratio_.sum():.3f}")
+        # build tasks for worker pool
+        tasks = []
+        listing_meta = {}  # map from listing_id -> other meta (num_rooms, result_dir)
+        for row in rows:
+            listing_id = str(row.get('id','')).strip()
+            if not listing_id:
+                continue
+            images_dir = os.path.join(images_root, listing_id)
+            result_dir = str(results_csv_dir / listing_id)
+            try:
+                num_rooms = int(row.get('num_rooms') or row.get('num_pieces') or 1)
+            except Exception:
+                num_rooms = 1
+            tasks.append((listing_id, images_dir))
+            listing_meta[listing_id] = {"result_dir": result_dir, "num_rooms": num_rooms}
 
-    # 5) KMeans : une image représentative par cluster
-    n_clusters = min(n_final, len(kept_imgs))
-    if n_clusters <= 0:
-        print("n_final invalid (<=0). Exiting.")
-        return
+        # use imap_unordered to read images in parallel (I/O bound)
+        it = pool.imap_unordered(read_listing_images_for_listing, tasks)
 
-    kmeans = KMeans(n_clusters=n_clusters, random_state=0)
-    labels = kmeans.fit_predict(embs_pca)
+        report_rows = []
+        # iterate as workers complete
+        pbar = tqdm(total=len(tasks), desc=f"Listings ({csv_base})")
+        for listing_id, images_bytes in it:
+            pbar.update(1)
+            meta = listing_meta.get(listing_id)
+            if meta is None:
+                print(f"[orchestrator] unknown listing returned: {listing_id}")
+                continue
 
-    selected = []
-    for lab in range(n_clusters):
-        idxs = np.where(labels == lab)[0]
-        if idxs.size == 0:
-            continue
-        centroid = embs_pca[idxs].mean(axis=0)
-        dists = np.linalg.norm(embs_pca[idxs] - centroid, axis=1)
-        chosen = idxs[np.argmin(dists)]
-        selected.append((kept_imgs[chosen], lab))
+            result_dir = meta["result_dir"]
+            num_rooms = meta["num_rooms"]
 
-    # écriture des images sélectionnées
-    sel_dir = os.path.join(args.output_dir, 'selected')
-    os.makedirs(sel_dir, exist_ok=True)
-    for p, lab in selected:
-        dst = os.path.join(sel_dir, f'cluster_{lab}_{os.path.basename(p)}')
-        shutil.copyfile(p, dst)
+            # call AI processing in main process (models loaded here)
+            try:
+                summary = process_listing_from_bytes(listing_id=listing_id,
+                                                     images_bytes=images_bytes,
+                                                     results_dir=result_dir,
+                                                     clip_cfg=clip_cfg,
+                                                     model_vis=model_vis,
+                                                     processor_vis=processor_vis,
+                                                     device=device,
+                                                     batch_size=args.batch_size,
+                                                     num_rooms=num_rooms,
+                                                     max_pca_components=args.max_pca_components,
+                                                     clip_debug=args.clip_debug)
+            except Exception as e:
+                print(f"[{listing_id}] pipeline failed: {e}")
+                summary = {"listing_id": listing_id, "total": 0, "kept": 0, "selected": 0, "clusters": 0, "selected_paths": []}
 
-    print(f"Selected {len(selected)} representative images")
-    for p, lab in selected:
-        print(f" - cluster {lab}: {p}")
+            rel_selected = []
+            for p in summary.get("selected_paths", []):
+                try:
+                    rel_selected.append(os.path.relpath(p, results_csv_dir))
+                except Exception:
+                    rel_selected.append(p)
+            report_rows.append({
+                "listing_id": listing_id,
+                "total": summary.get("total", 0),
+                "kept": summary.get("kept", 0),
+                "selected": summary.get("selected", 0),
+                "clusters": summary.get("clusters", 0),
+                "selected_paths": "|".join(rel_selected),
+                "time_s": summary.get("time_s", 0.0)
+            })
 
-    # résumé
-    meta = {
-        "total": len(image_paths),
-        "kept": len(kept),
-        "selected": len(selected),
-        "clusters": len(set(l for _, l in selected))
-    }
-    with open(os.path.join(args.output_dir, "summary.json"), "w", encoding="utf-8") as f:
-        json.dump(meta, f, indent=2)
+        pbar.close()
+
+        # write report.csv for this csv
+        report_path = results_csv_dir / "report.csv"
+        with open(report_path, "w", newline='', encoding='utf-8') as rf:
+            fieldnames = ["listing_id", "total", "kept", "selected", "clusters", "selected_paths", "time_s"]
+            writer = csv.DictWriter(rf, fieldnames=fieldnames)
+            writer.writeheader()
+            for r in report_rows:
+                writer.writerow(r)
+        print(f"Saved report: {report_path}")
+
+    pool.close()
+    pool.join()
 
 
 
+# -------------------------
+# CLI
+# -------------------------
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--input_dir', default='../output/test_img/2507940269')
-    parser.add_argument('--output_dir', default='../output/cluster_res/')
-    parser.add_argument('--clip_model', default='ViT-B-32')
-    parser.add_argument('--clip_pretrained', default='openai')
-    parser.add_argument('--img_size', type=int, default=224)
-    parser.add_argument('--n_final', type=int, default=5,
-                        help="Nombre final d'images à garder (ex: 1 par pièce).")
-    parser.add_argument('--clip_debug', action='store_true', help="Affiche les similitudes CLIP pour debug")
+    parser.add_argument('-c','--csv-root', type=str, default='../../output/csv')
+    parser.add_argument('-i','--images-root', type=str, default='../../../data/images')
+    parser.add_argument('-r','--results-root', type=str, default='../../output/images')
+    parser.add_argument('--visual-model', type=str, default='facebook/dinov3-vits16-pretrain-lvd1689m')
+    parser.add_argument('--clip-hf-model', type=str, default='openai/clip-vit-base-patch32')
+    parser.add_argument('--batch-size', type=int, default=64)
+    parser.add_argument('--max-pca-components', type=int, default=16)
+    parser.add_argument('--device', type=str, default='auto', choices=['auto','cpu','cuda'])
+    parser.add_argument('--num-workers', type=int, default=4, help='workers for CPU I/O (reading images)')
+    parser.add_argument('--clip-debug', action='store_true')
     args = parser.parse_args()
 
-    print('\n=== ENV INFO ===')
-    print('torch version:', torch.__version__)
-    print('cuda available:', torch.cuda.is_available())
-    print('bf16 supported:', torch.cuda.is_bf16_supported() if torch.cuda.is_available() else False)
-    print('=== END ENV INFO ===\n')
+    # unify device
+    if args.device == "auto":
+        args.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    run_pipeline(args, n_final=args.n_final, max_pca_components=16, clip_debug=args.clip_debug)
+    print("=== ORCHESTRATOR START ===")
+    print(f"device={args.device}, cpu workers={args.num_workers}, batch_size={args.batch_size}")
+    process_all(args.csv_root, args.images_root, args.results_root, args)
+    print("=== DONE ===")
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
