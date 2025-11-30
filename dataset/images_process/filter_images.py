@@ -3,13 +3,10 @@ import csv
 import argparse
 from pathlib import Path
 from multiprocessing import Pool, cpu_count
-from typing import List, Tuple
 from tqdm import tqdm
 import torch
 
 from ai_part import init_models, process_listing_from_bytes
-
-
 
 # -------------------------
 # worker: CPU-bound I/O reading images for a listing
@@ -41,9 +38,8 @@ def read_listing_images_for_listing(task):
     return listing_id, imgs
 
 
-
 # -------------------------
-# orchestrator: main
+# orchestrateur:
 # -------------------------
 def process_all(csv_root, images_root, results_root, args):
     # collect CSV files
@@ -52,7 +48,7 @@ def process_all(csv_root, images_root, results_root, args):
         print("Aucun CSV trouvé.")
         return
 
-    # init models once (main process)
+    # init models
     device = args.device if args.device != "auto" else ("cuda" if __import__("torch").cuda.is_available() else "cpu")
     clip_cfg, model_vis, processor_vis = init_models(device=device,
                                                     clip_hf_id=args.clip_hf_model,
@@ -61,6 +57,9 @@ def process_all(csv_root, images_root, results_root, args):
     # create pool for I/O tasks (num_workers ~ cpu_count - 1)
     n_workers = max(1, min(args.num_workers, cpu_count()-1))
     pool = Pool(processes=n_workers)
+
+    # Extensions d'images pour la vérification
+    check_exts = {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tiff'}
 
     for csv_path in csv_files:
         csv_base = Path(csv_path).stem
@@ -73,74 +72,112 @@ def process_all(csv_root, images_root, results_root, args):
             reader = csv.DictReader(f, delimiter=';')
             rows = list(reader)
 
-        # build tasks for worker pool
+        # build tasks for worker pool AND pre-fill report for skipped items
         tasks = []
         listing_meta = {}  # map from listing_id -> other meta (num_rooms, result_dir)
+        report_rows = []   # On commence à remplir le rapport avec les items déjà traités
+
+        print("Checking existing output directories...")
+        
         for row in rows:
             listing_id = str(row.get('id','')).strip()
             if not listing_id:
                 continue
+            
             images_dir = os.path.join(images_root, listing_id)
             result_dir = str(results_csv_dir / listing_id)
+            
             try:
                 num_rooms = int(row.get('num_rooms') or row.get('num_pieces') or 1)
             except Exception:
                 num_rooms = 1
+
+            # --- VERIFICATION EXISTENCE ---
+            already_done = False
+            if os.path.isdir(result_dir):
+                # Vérifie s'il y a au moins une image dans le dossier de destination
+                # On scanne juste le premier niveau du dossier result_dir
+                files_in_dest = os.listdir(result_dir)
+                has_image = any(os.path.splitext(f)[1].lower() in check_exts for f in files_in_dest)
+                
+                if has_image:
+                    already_done = True
+            
+            if already_done:
+                # Si déjà traité, on note dans le rapport et on SKIP la tâche
+                # print(f"Skipping {listing_id} (already processed)")
+                report_rows.append({
+                    "listing_id": listing_id,
+                    "total": 0,
+                    "kept": 0,
+                    "selected": 0,
+                    "clusters": 0,
+                    "selected_paths": "ALREADY_PROCESSED_SKIPPED",
+                    "time_s": 0.0
+                })
+                continue # On passe au listing suivant sans l'ajouter aux tasks
+            # ------------------------------
+
+            # Si pas déjà fait, on ajoute à la liste des tâches à traiter
             tasks.append((listing_id, images_dir))
             listing_meta[listing_id] = {"result_dir": result_dir, "num_rooms": num_rooms}
 
-        # use imap_unordered to read images in parallel (I/O bound)
-        it = pool.imap_unordered(read_listing_images_for_listing, tasks)
+        print(f"Total listings: {len(rows)}. To process: {len(tasks)}. Skipped: {len(report_rows)}.")
 
-        report_rows = []
-        # iterate as workers complete
-        pbar = tqdm(total=len(tasks), desc=f"Listings ({csv_base})")
-        for listing_id, images_bytes in it:
-            pbar.update(1)
-            meta = listing_meta.get(listing_id)
-            if meta is None:
-                print(f"[orchestrator] unknown listing returned: {listing_id}")
-                continue
+        if tasks:
+            # use imap_unordered to read images in parallel (I/O bound)
+            it = pool.imap_unordered(read_listing_images_for_listing, tasks)
 
-            result_dir = meta["result_dir"]
-            num_rooms = meta["num_rooms"]
+            # iterate as workers complete
+            pbar = tqdm(total=len(tasks), desc=f"Listings ({csv_base})")
+            for listing_id, images_bytes in it:
+                pbar.update(1)
+                meta = listing_meta.get(listing_id)
+                if meta is None:
+                    print(f"[orchestrator] unknown listing returned: {listing_id}")
+                    continue
 
-            # call AI processing in main process (models loaded here)
-            try:
-                summary = process_listing_from_bytes(listing_id=listing_id,
-                                                     images_bytes=images_bytes,
-                                                     results_dir=result_dir,
-                                                     clip_cfg=clip_cfg,
-                                                     model_vis=model_vis,
-                                                     processor_vis=processor_vis,
-                                                     device=device,
-                                                     batch_size=args.batch_size,
-                                                     num_rooms=num_rooms,
-                                                     max_pca_components=args.max_pca_components,
-                                                     clip_debug=args.clip_debug)
-            except Exception as e:
-                print(f"[{listing_id}] pipeline failed: {e}")
-                summary = {"listing_id": listing_id, "total": 0, "kept": 0, "selected": 0, "clusters": 0, "selected_paths": []}
+                result_dir = meta["result_dir"]
+                num_rooms = meta["num_rooms"]
 
-            rel_selected = []
-            for p in summary.get("selected_paths", []):
+                # call AI processing in main process (models loaded here)
                 try:
-                    rel_selected.append(os.path.relpath(p, results_csv_dir))
-                except Exception:
-                    rel_selected.append(p)
-            report_rows.append({
-                "listing_id": listing_id,
-                "total": summary.get("total", 0),
-                "kept": summary.get("kept", 0),
-                "selected": summary.get("selected", 0),
-                "clusters": summary.get("clusters", 0),
-                "selected_paths": "|".join(rel_selected),
-                "time_s": summary.get("time_s", 0.0)
-            })
+                    summary = process_listing_from_bytes(listing_id=listing_id,
+                                                         images_bytes=images_bytes,
+                                                         results_dir=result_dir,
+                                                         clip_cfg=clip_cfg,
+                                                         model_vis=model_vis,
+                                                         processor_vis=processor_vis,
+                                                         device=device,
+                                                         batch_size=args.batch_size,
+                                                         num_rooms=num_rooms,
+                                                         max_pca_components=args.max_pca_components,
+                                                         clip_debug=args.clip_debug)
+                except Exception as e:
+                    print(f"[{listing_id}] pipeline failed: {e}")
+                    summary = {"listing_id": listing_id, "total": 0, "kept": 0, "selected": 0, "clusters": 0, "selected_paths": []}
 
-        pbar.close()
+                rel_selected = []
+                for p in summary.get("selected_paths", []):
+                    try:
+                        rel_selected.append(os.path.relpath(p, results_csv_dir))
+                    except Exception:
+                        rel_selected.append(p)
+                
+                # Ajout des résultats traités au rapport
+                report_rows.append({
+                    "listing_id": listing_id,
+                    "total": summary.get("total", 0),
+                    "kept": summary.get("kept", 0),
+                    "selected": summary.get("selected", 0),
+                    "clusters": summary.get("clusters", 0),
+                    "selected_paths": "|".join(rel_selected),
+                    "time_s": summary.get("time_s", 0.0)
+                })
 
-        # write report.csv for this csv
+            pbar.close()
+
+        # write report.csv for this csv (contains both SKIPPED and PROCESSED)
         report_path = results_csv_dir / "report.csv"
         with open(report_path, "w", newline='', encoding='utf-8') as rf:
             fieldnames = ["listing_id", "total", "kept", "selected", "clusters", "selected_paths", "time_s"]
@@ -152,7 +189,6 @@ def process_all(csv_root, images_root, results_root, args):
 
     pool.close()
     pool.join()
-
 
 
 # -------------------------
@@ -171,6 +207,7 @@ def main():
     parser.add_argument('--num-workers', type=int, default=4, help='workers for CPU I/O (reading images)')
     parser.add_argument('--clip-debug', action='store_true')
     args = parser.parse_args()
+
 
     # unify device
     if args.device == "auto":

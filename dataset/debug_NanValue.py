@@ -32,14 +32,14 @@ rename_dict = {
 }
 
 # Dossiers (Ajuste les chemins si besoin)
-LOC_DIR = '../../data/location/'
+LOC_DIR = '../../data/achat/'
 
 
 def get_appart_stats():
     # 1. Récupérer tous les fichiers CSV
     files = glob.glob(os.path.join(LOC_DIR, '*.csv'))
 
-    print(f"Analyse de {len(files)} fichiers pour trouver les problèmes sur les APPARTEMENTS...")
+    print(f"Analyse de {len(files)} fichiers pour trouver les problèmes sur les NAN et les vars associées...")
 
     all_apparts = []
 
@@ -53,6 +53,7 @@ def get_appart_stats():
             df.rename(columns=rename_dict, inplace=True)
             df["total_land_area_sqm"] = df["total_land_area_sqm"].fillna(0)
             df["num_parking_spaces"] = df["num_parking_spaces"].fillna(0)
+            df["features"] = df["features"].fillna("rien")
 
             # On filtre uniquement sur le texte "appart" dans le type
             # (On gère les NaN dans property_type pour ne pas planter)

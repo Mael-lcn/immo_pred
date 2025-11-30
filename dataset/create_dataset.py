@@ -7,6 +7,7 @@ from tqdm import tqdm
 from functools import partial
 import multiprocessing
 import csv
+import re
 
 
 
@@ -30,12 +31,14 @@ rename_dict = {
     "surface_tolale_terrain": "total_land_area_sqm", 
     "nb_etages_Immeuble": "building_num_floors", 
     "annee_construction": "year_built", 
-    "specificites": "features", 
+    "specificites": "special_features", 
     "images_urls": "images", 
     "description": "description",
 }
 
 colonnes_cibles = list(rename_dict.values())
+
+
 
 # --- RÈGLES DE FILTRAGE ---
 RULES_COMMON = {
@@ -62,6 +65,149 @@ RULES_MAISON = {
 }
 
 
+
+# =============================================================================
+# 1. PRÉ-COMPILATION DES REGEX (Exécuté 1 seule fois au démarrage)
+# =============================================================================
+
+# A. Découpeur de phrases
+# On coupe sur : Points/Exclamation/Interrogation suivis d'espace, ou Sauts de ligne
+SENTENCE_SPLITTER = re.compile(r'(?:[\.\!\?]\s+|\n+)')
+
+# B. Motifs Interdits
+# Si une phrase contient un de ces motifs, ELLE EST ENTIÈREMENT SUPPRIMÉE.
+BANNED_PATTERNS_LIST = [
+    # =========================================================================
+    # 1. DÉTECTION MONÉTAIRE DIRECTE (Le Leakage Absolu)
+    # =========================================================================
+    # Capture : "400 €", "400.000 euros", "1200 EUR", "500k€", "400 $"
+    # \d[\d\s\.,]* : Un chiffre suivi potentiellement d'espaces, points ou virgules
+    r'\d[\d\s\.,]*\s*(€|eur|euro|k€|\$|francs)', 
+
+    # =========================================================================
+    # 2. MOTS-CLÉS "ARGENT" EXPLICITES
+    # =========================================================================
+    r'\bprix\b',                 # "Prix de vente", "Prix du loyer"
+    r'\bloyer\b',                # "Loyer mensuel", "Appel de loyer"
+    r'\bbudget\b',               # "Budget à prévoir", "Petit budget"
+    r'\bvaleur\b',               # "Valeur locative", "Valeur du bien"
+    r'\bmontant\b',              # "Montant des charges"
+    r'\btarif\b',                # "Tarif attractif"
+    r'\bsomme\b',                # "Somme demandée"
+    r'\bcoût\b',                 # "Coût total", "Coût énergie"
+    r'\bfinance',                # "Financement", "Financier"
+    r'\bpaiement\b',             # "Facilités de paiement"
+    r'\bcrédit\b',               # "Crédit vendeur", "Crédit immobilier"
+    r'\bmensualité\b',           # "Mensualités de..."
+    r'\brentabilité\b',          # "Forte rentabilité" (Indice fort sur le prix)
+    r'\bca\b',                   # "Chiffre d'affaires" (pour les locaux comm.)
+
+    # =========================================================================
+    # 3. FRAIS, CHARGES ET JARGON D'AGENCE
+    # =========================================================================
+    r'\bhonoraires\b',           # "Honoraires charge vendeur/acquéreur"
+    r'\bfrais\s*d\'?agence\b',   # "Frais d'agence"
+    r'\bfai\b',                  # "Frais Agence Inclus"
+    r'\bhai\b',                  # "Honoraires Agence Inclus"
+    r'\bttc\b',                  # "Toutes Taxes Comprises" (Souvent collé au prix)
+    r'\bht\b',                   # "Hors Taxe"
+    r'\bnet\s*vendeur\b',        # "Prix net vendeur"
+    r'\bcharges\b',              # "Charges de copro", "Charges mensuelles"
+    r'\bdepot\s*de\s*garantie\b',# "Dépôt de garantie"
+    r'\bcaution\b',              # "Caution solidaire", "Caution de X euros"
+    r'\bnotaire\b',              # "Frais de notaire"
+    r'\btaxe\s*foncière\b',      # Souvent donnée avec le prix
+    r'\btaxe\s*habitation\b',
+    r'\bcc\b',                   # "Loyer CC" (Charges Comprises)
+    r'\bhc\b',                   # "Loyer HC" (Hors Charges)
+
+    # =========================================================================
+    # 4. TERMES TEMPORELS LIÉS À L'ARGENT
+    # =========================================================================
+    r'\bmensuel\b',              # "Loyer mensuel", "Paiement mensuel"
+    r'/\s*mois',                 # "500 / mois"
+    r'par\s*mois',               # "500 par mois"
+
+    # =========================================================================
+    # 5. TERMES DE TRANSACTION & NÉGOCIATION (Contexte dangereux)
+    # =========================================================================
+    r'\btransaction\b',
+    r'\binvestissement\b',       # "Idéal investissement" (Biais le modèle vers le bas prix)
+    r'\binvestisseur\b',         # "Idéal investisseur"
+    r'\bnégociable\b',           # "Prix négociable"
+    r'\bfaire\s*offre\b',        # "Faire offre raisonnable"
+    r'\bnous\s*consulter\b',     # "Prix : nous consulter"
+    r'\bestimation\b',           # "Estimation gratuite"
+    r'\bvendue?\b',              # "Déjà vendu" (Noise)
+    r'\blouée?\b',               # "Déjà loué"
+
+    # =========================================================================
+    # 6. CONTACTS & BRUIT ADMINISTRATIF (Rappel de sécurité)
+    # =========================================================================
+    r'(tél|tel|phone|mobile|port|contact)\b',
+    r'[0-9]{2}[\s\.]?[0-9]{2}[\s\.]?[0-9]{2}', # 06 00...
+    r'exclusivite',
+    r'exclusivité',
+    r'[@]',
+    r'www\.',
+    r'\[coordonnées masquées\]',
+    
+    # Administratif strict
+    r'géorisques',
+    r'loi alur',
+    r'copropriété',
+    r'syndic',
+    r'procédure en cours',
+    r'rsac',
+    r'siret',
+    r'référence\s*:',
+    r'visite',
+    r'\b(nb|nombre|copropriété)\s*(de)?\s*(\d+\s*lots?|lots?\s*[:\s\.]*\d+)',]
+
+# Compilation du motif géant optimisé
+# On joint tout avec OU (|)
+BANNED_REGEX = re.compile('|'.join(BANNED_PATTERNS_LIST))
+
+
+# =============================================================================
+# 2. FONCTION DE NETTOYAGE
+# =============================================================================
+
+def clean_description_text(text):
+    """
+    Version ultra-rapide : utilise les regex pré-compilées globales.
+    """
+    if not isinstance(text, str):
+        return ""
+
+    # 1. Normalisation
+    # On passe en minuscule tout de suite pour matcher les regex
+    text = text.lower().replace('\xa0', ' ').replace('\r', ' ')
+    
+    # 2. Découpage (Utilise l'objet compilé global)
+    sentences = SENTENCE_SPLITTER.split(text)
+
+    kept_sentences = []
+
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence: 
+            continue
+
+        # 3. Filtrage (Utilise l'objet compilé global)
+        # .search() est très rapide car l'automate est déjà construit
+        if BANNED_REGEX.search(sentence):
+            continue
+
+        kept_sentences.append(sentence)
+
+    # 4. Reconstruction
+    clean_text = ". ".join(kept_sentences)
+    clean_text = re.sub(r'\.+', '.', clean_text) # Nettoyage rapide des points multiples
+
+    return clean_text.strip()
+
+
 def apply_rules(df, rules):
     for col, (mini, maxi) in rules.items():
         if col in df.columns:
@@ -80,6 +226,8 @@ def filtre(df):
     df = df.dropna(subset=['property_type'])
     df["total_land_area_sqm"] = df["total_land_area_sqm"].fillna(0)
     df["num_parking_spaces"] = df["num_parking_spaces"].fillna(0)
+    df["special_features"] = df["special_features"].fillna("No one")
+
     df = df.dropna()
 
     # Règles communes
@@ -111,6 +259,12 @@ def filtre(df):
     num_images = images_str.str.count(r'\|') + (images_str != '').astype(int)
     df_final = df_final[num_images >= df_final['num_rooms']]
 
+    # --- APPLICATION DU NETTOYAGE TEXTE ICI ---
+    # On applique la fonction définie plus haut sur toute la colonne description
+    df_final['description'] = df_final['description'].astype(str).apply(clean_description_text)
+    # On retire les lignes où la description est devenue vide ou trop courte
+    df_final = df_final[df_final['description'].str.len() > 25]
+
     return df_final.drop_duplicates(ignore_index=True)
 
 
@@ -133,7 +287,7 @@ def worker(data_package, output_dir):
 
         nb_avant = len(df)
         
-        # Filtrage
+        # Filtrage (inclut maintenant le nettoyage texte)
         df_filtered = filtre(df)
         
         nb_apres = len(df_filtered)
