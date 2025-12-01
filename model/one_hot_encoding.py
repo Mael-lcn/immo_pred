@@ -13,6 +13,14 @@ import csv
 # Définition des colonnes OHE à retirer du vocabulaire final des FEATURES
 EXCLUSIONS = {"bathtub", "second_bathroom", "sold_rented"}
 
+# Mappings Ordinaux
+DPE_MAP = {'A': 7, 'B': 6, 'C': 5, 'D': 4, 'E': 3, 'F': 2, 'G': 1}
+ETAT_MAP = {
+    'Rénové': 4, 'Très bon état': 3, 'Bon état': 2,
+    'À rafraichir': 1, 'Travaux à prévoir': 1,
+}
+PROPERTY_MAP = {'Appartement': 1, 'Maison': 0}
+
 
 # =============================================================================
 # WORKER 1 : SCAN DU VOCABULAIRE (ATOMICITÉ PAR EXPLODE)
@@ -20,7 +28,6 @@ EXCLUSIONS = {"bathtub", "second_bathroom", "sold_rented"}
 def scan_worker(file_path):
     """
     Lit un fichier et extrait les sets atomiques en utilisant split/explode.
-    
     Retourne deux sets distincts : (ext_set, feat_set).
     """
     try:
@@ -31,21 +38,14 @@ def scan_worker(file_path):
         ext_series = df['exterior_access'].fillna("").astype(str)
         feat_series = df['special_features'].fillna("").astype(str)
 
-        # 2. EXTRACTION ATOMIQUE
-        # EXTÉRIEUR (Séparateur: ,)
-        # Utilisation de str.split().explode().dropna() pour obtenir des éléments atomiques uniques
-        ext_set = set(ext_series.str.split(',').explode().dropna().tolist())
-        
-        # FEATURES (Séparateur: |)
-        feat_set = set(feat_series.str.split('|').explode().dropna().tolist())
+        # EXTRACTION ATOMIQUE
+        ext_set = set(ext_series.str.split(',').explode().str.strip().dropna().tolist())
+        feat_set = set(feat_series.str.split('|').explode().str.strip().dropna().tolist())
 
-        # 3. NETTOYAGE (Séparé)
+        # NETTOYAGE
         ext_set.discard("") 
-        ext_set.discard(" ")
         feat_set.discard("")
-        feat_set.discard(" ")
 
-        # On retourne les deux sets distincts
         return (ext_set, feat_set) 
 
     except Exception as e:
@@ -54,28 +54,30 @@ def scan_worker(file_path):
 
 
 # =============================================================================
-# WORKER 2 : APPLICATION DU OHE ET OVERWRITE (DEUX SETS)
+# WORKER 2 : APPLICATION DU OHE ET SAUVEGARDE (NOUVEAU FICHIER)
 # =============================================================================
-def process_worker(file_path, global_ext_cols, global_feat_cols):
+def process_worker(file_path, global_ext_cols, global_feat_cols, input_base_dir, output_base_dir):
     """
-    Charge un fichier, applique le OHE en utilisant les séparateurs natifs,
-    aligne sur les deux listes de colonnes globales, et écrase le fichier.
+    Charge un fichier, applique le OHE, aligne sur les colonnes globales,
+    et écrit dans le dossier de sortie en reproduisant l'arborescence.
     """
     try:
         # 1. Lecture complète 
-        # Note: Pas besoin de forcer dtype=str si le script de filtrage a bien utilisé astype(str)
         df = pd.read_csv(file_path, sep=";")
 
         # 2. Préparation (remplacer les NaN)
         df['exterior_access'] = df['exterior_access'].fillna("")
         df['special_features'] = df['special_features'].fillna("")
 
-        # 3. One-Hot Encoding LOCAL (avec les séparateurs natifs corrects)
+        df['energy_rating'] = df['energy_rating'].map(DPE_MAP)
+        df['property_status'] = df['property_status'].map(ETAT_MAP)
+        df['property_type'] = df['property_type'].map(PROPERTY_MAP)
+
+        # 3. One-Hot Encoding LOCAL
         local_dummies_ext = df['exterior_access'].str.get_dummies(sep=',') # Sép. Virgule
         local_dummies_feat = df['special_features'].str.get_dummies(sep='|') # Sép. Pipe
 
-        # 4. ALIGNEMENT GLOBAL : (Alignement sur DEUX listes globales différentes)
-        # Chaque bloc est aligné sur sa propre liste de vocabulaire
+        # 4. ALIGNEMENT GLOBAL
         aligned_ext = local_dummies_ext.reindex(columns=global_ext_cols, fill_value=0)
         aligned_feat = local_dummies_feat.reindex(columns=global_feat_cols, fill_value=0)
 
@@ -88,8 +90,17 @@ def process_worker(file_path, global_ext_cols, global_feat_cols):
                               aligned_ext, 
                               aligned_feat], axis=1)
 
-        # 7. Écriture (Overwrite)
-        df_final.to_csv(file_path, sep=";", index=False, quoting=csv.QUOTE_MINIMAL)
+        # 7. GESTION DES CHEMINS (Input -> Output)
+        # Calcul du chemin relatif (ex: 'sous_dossier/fichier.csv') par rapport au dossier input racine
+        rel_path = os.path.relpath(file_path, input_base_dir)
+        # Création du chemin final complet
+        target_path = os.path.join(output_base_dir, rel_path)
+        
+        # Création du dossier parent s'il n'existe pas
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+
+        # 8. Écriture
+        df_final.to_csv(target_path, sep=";", index=False, quoting=csv.QUOTE_MINIMAL)
 
         return 1
     except Exception as e:
@@ -98,14 +109,24 @@ def process_worker(file_path, global_ext_cols, global_feat_cols):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="OHE In-Place avec alignement global des colonnes (2 sets).")
-    parser.add_argument('-i', '--input', type=str, default='../output/csv', 
-                        help="Dossier racine contenant les CSV (traitement récursif)")
+    parser = argparse.ArgumentParser(description="OHE avec alignement global et écriture dans dossier sortie.")
+    parser.add_argument('-i', '--input', type=str, default='../output/raw_csv')
+    parser.add_argument('-o', '--output', type=str, default='../output/processed_csv')
     parser.add_argument('-w', '--workers', type=int, default=max(1, multiprocessing.cpu_count()-1))
-    
+
     args = parser.parse_args()
 
     t0 = time.time()
+    
+    # Vérification dossier input
+    if not os.path.exists(args.input):
+        print(f"Erreur: Le dossier d'entrée {args.input} n'existe pas.")
+        return
+
+    # Création dossier output racine si besoin
+    if not os.path.exists(args.output):
+        print(f"Création du dossier de sortie : {args.output}")
+        os.makedirs(args.output, exist_ok=True)
 
     files = glob.glob(os.path.join(args.input, '**', '*.csv'), recursive=True)
     if not files:
@@ -125,36 +146,37 @@ def main():
     with multiprocessing.Pool(args.workers) as pool:
         # Les workers retournent (ext_set, feat_set) pour chaque fichier
         results = list(tqdm(pool.imap_unordered(scan_worker, files), total=len(files), desc="Scan"))
-        
-        # Consolidation des deux sets séparément
+
+        # Consolidation
         for (ext_set, feat_set) in results:
             global_ext_set.update(ext_set)
             global_feat_set.update(feat_set)
 
-    # 2. FILTRAGE : Exclusion des features
+    # FILTRAGE
     global_feat_set = global_feat_set.difference(EXCLUSIONS)
 
-    # 3. Conversion et tri pour l'alignement
+    # Conversion et tri
     global_ext_list = sorted(list(global_ext_set))
     global_feat_list = sorted(list(global_feat_set))
 
-    # AFFICHAGE DU VOCABULAIRE FINAL
-    print("\n--- VOCABULAIRE FINAL SÉPARÉ ---")
-    
-    print(f"Colonnes 'EXTERIOR' (Préfixe ext_) : {len(global_ext_list)} éléments")
-    print(f"> Aperçu : {global_ext_list[:5]}...")
-    
-    print(f"Colonnes 'FEATURES' (Préfixe feat_) : {len(global_feat_list)} éléments")
-    print(f"> Aperçu : {global_feat_list[:5]}...")
-    print(f"[NOTE] {len(EXCLUSIONS)} features exclues : {list(EXCLUSIONS)}")
+    print(f"Colonnes 'EXTERIOR' : {len(global_ext_list)} éléments")
+    print(f"> : {list(global_ext_list)} éléments\n")
+    print(f"Colonnes 'FEATURES' : {len(global_feat_list)} éléments")
+    print(f">' : {list(global_feat_list)} éléments")
 
     # ---------------------------------------------------------
     # ÉTAPE 2 : ÉCRITURE
     # ---------------------------------------------------------
-    print("\n--- Étape 2 : Standardisation et Écriture ---")
+    print(f"\n--- Étape 2 : Standardisation et Écriture vers {args.output} ---")
 
-    # Préparation de la fonction worker avec les DEUX listes globales
-    process_func = partial(process_worker, global_ext_cols=global_ext_list, global_feat_cols=global_feat_list)
+    # Préparation de la fonction worker avec les chemins racine
+    process_func = partial(
+        process_worker, 
+        global_ext_cols=global_ext_list, 
+        global_feat_cols=global_feat_list, 
+        input_base_dir=args.input,
+        output_base_dir=args.output
+    )
 
     success_count = 0
     with multiprocessing.Pool(args.workers) as pool:

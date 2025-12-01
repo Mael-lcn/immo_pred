@@ -228,6 +228,7 @@ def filtre(df):
     df["exterior_access"] = df["exterior_access"].fillna("")
 
     df = df.dropna()
+    df = df[df['property_type'].isin(['Appartement', 'Maison'])]
 
     # Règles communes
     df = apply_rules(df, RULES_COMMON)
@@ -285,10 +286,10 @@ def worker(data_package, output_dir):
         df = df[cols_presentes]
 
         nb_avant = len(df)
-        
+
         # Filtrage (inclut maintenant le nettoyage texte)
         df_filtered = filtre(df)
-        
+
         nb_apres = len(df_filtered)
 
         # Écriture si données restantes
@@ -372,7 +373,7 @@ def run(args):
     print("-" * 65)
     tot_suppr = tot_avant - tot_apres
     tot_pct = (tot_suppr / tot_avant * 100) if tot_avant > 0 else 0
-    
+
     print(f"{'TOTAL':<10} | {tot_avant:<12,} | {tot_apres:<12,} | {tot_suppr:<9,} (-{tot_pct:.1f}%)".replace(",", " "))
     print("="*65)
     print(f"Temps total : {dt:.2f}s")
@@ -385,7 +386,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-a', '--achat', type=str, default='../../data/achat/')
     parser.add_argument('-l', '--location', type=str, default='../../data/location/')
-    parser.add_argument('-o', '--output', type=str, default='../output/csv')
+    parser.add_argument('-o', '--output', type=str, default='../output/raw_csv')
     parser.add_argument('-w', '--workers', type=int, default=max(1, multiprocessing.cpu_count()-1))
     args = parser.parse_args()
 
