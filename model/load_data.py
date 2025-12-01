@@ -1,176 +1,231 @@
-import os
-import glob
-import cv2
-import torch
-import numpy as np
 import pandas as pd
-import math
-from torch.utils.data import Dataset
+import numpy as np
+import torch
+import os
 from sklearn.preprocessing import StandardScaler
+from torch.utils.data import Dataset
+from PIL import Image
 
 
 
-# --- FONCTIONS UTILITAIRES ---
-def get_cols_config(csv_path, sep=";"):
-    """Lit la première ligne pour détecter les colonnes."""
-    df_sample = pd.read_csv(csv_path, sep=sep, nrows=5)
-    # On ignore les colonnes techniques ou cibles
-    ignore = ['id', 'price', 'images', 'type_transaction', 'dataset_source', 'Unnamed: 0']
-    
-    num_cols = [c for c in df_sample.columns if df_sample[c].dtype != 'object' and c not in ignore]
-    text_cols = [c for c in df_sample.columns if df_sample[c].dtype == 'object' and c not in ignore]
-    return num_cols, text_cols
+# Mappings Ordinal (Texte -> Chiffre)
+DPE_MAP = {'A': 7, 'B': 6, 'C': 5, 'D': 4, 'E': 3, 'F': 2}
+ETAT_MAP = {
+    'neuf': 5, 'refait a neuf': 5, 'excellent': 5,
+    'tres bon': 4, 'bon': 3,
+    'correct': 2, 'usage': 2,
+    'travaux': 1, 'renover': 0
+}
+
+# À rafraichir; Bon état; Rénové; Travaux à prévoir; Très bon état
 
 
-def prepare_scaler_from_subset(csv_folder, num_cols, sample_files=5, sep=";"):
-    """Fit le scaler sur un échantillon de fichiers."""
-    csv_files = glob.glob(os.path.join(csv_folder, "*.csv"))
-    if not csv_files:
-        raise ValueError(f"Aucun CSV dans {csv_folder}")
+def get_cols_config():
+    """
+    Retourne la configuration SOTA des colonnes basée sur l'expertise du dataset.
+    """
 
-    files_to_read = csv_files[:sample_files]
-    data_values = []
-    print(f"[SCALER] Fitting sur {len(files_to_read)} fichiers...")
+    # 1. TEXTE (Concaténation pour CamemBERT)
+    # Ces colonnes seront fusionnées : "Titre . Specificités . Description"
+    text_cols = ['titre', 'specificites', 'description']
 
-    for f in files_to_read:
-        df = pd.read_csv(f, sep=sep, usecols=num_cols)
-        data_values.append(df.fillna(0).values)
-     
-    full_sample = np.vstack(data_values)
+    # 2. CATÉGORIES PURES (Embeddings Classiques)
+    # Variables nominales sans ordre mathématique logique.
+    cat_cols = [
+        'type_bien',  # Maison vs Appartement : pas d'ordre
+        'orientation', # Nord vs Sud : pas d'ordre linéaire simple
+        'exterior_access'
+    ]
+
+    # 3. CONTINUS (Periodic Embeddings)
+    # Regroupe :
+    # - Les vrais continus (Surface, GPS)
+    # - Les compteurs (Pièces, Chambres)
+    # - Les ordinaux convertis (DPE, État) -> Le modèle apprendra la courbe de prix exacte.
+    cont_cols = [
+        'latitude', 
+        'longitude', 
+        'surface_habitable', 
+        'surface_tolale_terrain', 
+        'nb_pieces', 
+        'nb_chambres', 
+        'nb_salleDeBains', 
+        'nb_placesParking', 
+        'nb_etages_Immeuble', 
+        'annee_construction', 
+        'classe_energetique', # SOTA: Traité comme un score (1 à 8)
+        'etat_bien'           # SOTA: Traité comme un score (0 à 5)
+    ]
+
+    # Note : 'id', 'prix', 'images_urls' sont ignorés ici car gérés spécifiquement
+    # dans le Dataset (Meta-données ou Cibles).
+
+    return cont_cols, cat_cols, text_cols
+
+
+def prepare_preprocessors(csv_folder, cont_cols, cat_cols):
+    """
+    Calibre le Scaler (pour les chiffres) et les Index (pour les catégories).
+
+    Stratégie SOTA :
+    - Continus : StandardScaler (Moyenne=0, Variance=1). Indispensable pour que les 
+      PeriodicEmbeddings et le réseau convergent vite.
+    - Catégories : On crée un dictionnaire unique pour transformer le texte en ID.
+    """
+    print("[PREPROC] Calibration des données (Normalisation & Indexation)...")
+
+    df_list = []
+    # On liste les 5er fichiers CSV
+    files = [os.path.join(csv_folder, f) for f in os.listdir(csv_folder)][:5]
+
+    for f in files: 
+        try:
+            df = pd.read_csv(f)
+
+            # --- CONVERSIONS PRÉALABLES INDISPENSABLES ---
+            # Le Scaler ne sait lire que des chiffres. Il faut convertir DPE/ETAT maintenant.
+
+            # 1. DPE (Lettre -> Chiffre)
+            df['classe_energetique'] = df['classe_energetique'].astype(str).str.upper().map(DPE_MAP)
+
+            # 2. ETAT (Texte -> Chiffre)
+            df['etat_bien'] = df['etat_bien'].astype(str).map(ETAT_MAP)
+
+            df_list.append(df)
+        except Exception as e:
+            print(e)
+
+    full_df = pd.concat(df_list, ignore_index=True)
+
+    # ==========================================================================
+    # 1. CALIBRATION CONTINUE (SCALER)
+    # ==========================================================================
+
     scaler = StandardScaler()
-    scaler.fit(full_sample)
-    print("[SCALER] Prêt.")
-    return scaler
+    scaler.fit(full_df[cont_cols].values)
+
+    # ==========================================================================
+    # 2. CALIBRATION CATÉGORIELLE (INDEXATION)
+    # ==========================================================================
+    cat_mappings = {}
+    cat_dims = []
+
+    for c in cat_cols:
+        # On convertit tout en string
+        full_df[c] = full_df[c].astype(str)
+  
+        # On récupère les valeurs uniques
+        uniques = sorted(full_df[c].unique())
+
+        # Création du dictionnaire : Valeur -> ID
+        mapping = {val: i for i, val in enumerate(uniques)}
+
+        # Ajout du token <UNK> pour la robustesse en production
+        mapping["<UNK>"] = len(uniques)
+ 
+        cat_mappings[c] = mapping
+        cat_dims.append(len(mapping) + 1)
+
+    print(f"[PREPROC] Terminé. Scaler calibré sur {len(cont_cols)} variables.")
+
+    # On retourne None pour les médianes car on suppose que vous gérez les NaN ailleurs
+    return scaler, None, cat_mappings, cat_dims
 
 
-# --- DATASET PYTORCH ---
 class RealEstateDataset(Dataset):
-    def __init__(self, csv_folder, img_dir, tokenizer, scaler, num_cols, text_cols, is_train=True, sep=";"):
+    def __init__(self, csv_folder, img_dir, tokenizer, scaler, medians, cat_mappings, cont_cols, cat_cols, is_train=True):
         self.img_dir = img_dir
         self.tokenizer = tokenizer
-        self.target_size = (224, 224)
-        self.text_cols = text_cols
-
-        # 1. Chargement de TOUS les CSV en mémoire
-        files = glob.glob(os.path.join(csv_folder, "*.csv"))
-        if not files:
-            raise ValueError(f"Aucun CSV trouvé dans {csv_folder}")
-            
-        print(f"[DATASET] Chargement de {len(files)} fichiers CSV...")
-        df_list = [pd.read_csv(f, sep=sep, dtype={'id': str}) for f in files]
-        self.df = pd.concat(df_list, ignore_index=True)
+        self.scaler = scaler
+        self.medians = medians
+        self.cat_mappings = cat_mappings
+        self.cont_cols = cont_cols
+        self.cat_cols = cat_cols
         
-        # 2. Préparation Tabulaire
-        print("[DATASET] Normalisation des données tabulaires...")
-        X_tab = self.df[num_cols].fillna(0.0).values
-        self.tab_data = scaler.transform(X_tab).astype(np.float32)
-        
-        # 3. Pré-calcul des Cibles (Targets)
-        print("[DATASET] Pré-calcul des cibles...")
-        self.targets = torch.zeros((len(self.df), 2), dtype=torch.float32)
-        self.masks = torch.zeros((len(self.df), 2), dtype=torch.float32)
+        # Chargement
+        self.df = pd.concat([pd.read_csv(os.path.join(csv_folder, f)) for f in os.listdir(csv_folder) if f.endswith('.csv')], ignore_index=True)
 
-        prices = pd.to_numeric(self.df['price'], errors='coerce').fillna(0).values
-        sources = self.df['dataset_source'].fillna(0).astype(int).values
-        
-        # Boucle rapide
-        for i in range(len(self.df)):
-            val_log = math.log1p(max(0, prices[i]))
-            src = sources[i]
-            
-            if src == 0: # ACHAT
-                self.targets[i, 0] = val_log
-                self.masks[i, 0] = 1.0
-            elif src == 1: # LOCATION
-                self.targets[i, 1] = val_log
-                self.masks[i, 1] = 1.0
-            # Si src est autre chose, mask reste à 0 (ignoré par la loss)
-                
-        print(f"[DATASET] Initialisé avec {len(self.df)} annonces.")
-
+        # Nettoyage Targets
+        self.df['price'] = pd.to_numeric(self.df['price'], errors='coerce')
+        self.df = self.df.dropna(subset=['price'])
+        self.df['log_price'] = np.log1p(self.df['price'])
+        # Placeholder loyer (à adapter si vous l'avez)
+        self.df['log_rent'] = np.zeros(len(self.df))
 
     def __len__(self):
         return len(self.df)
 
-
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
-        id_str = str(row['id'])
 
-        # A. Images
-        images = self._load_images(id_str)
+        # 1. TEXTE (Fusion Titre + Specificites + Description)
+        # C'est ici qu'on gère les spécificités via BERT
+        parts = [
+            str(row.get('titre', '')),
+            str(row.get('specificites', '')),
+            str(row.get('description', ''))
+        ]
+        full_text = " . ".join([p for p in parts if p and str(p) != 'nan'])
+        
+        tokens = self.tokenizer(full_text, padding='max_length', truncation=True, max_length=128, return_tensors='pt')
 
-        # B. Texte
-        text_raw = " ".join([str(row[c]) for c in self.text_cols])
-        tokens = self.tokenizer(
-            text_raw, 
-            padding='max_length', 
-            truncation=True, 
-            max_length=128, 
-            return_tensors="pt"
-        )
+        # 2. CONTINUS (Avec Mapping DPE/Etat à la volée)
+        vals = []
+        for c in self.cont_cols:
+            val = row.get(c, np.nan)
+            
+            # Mapping DPE
+            if c == 'classe_energetique':
+                val = DPE_MAP.get(str(val).upper(), 4.0)
+            # Mapping Etat
+            elif c == 'etat_bien':
+                val_str = str(val).lower()
+                val = 3.0 # Default
+                for k, v in ETAT_MAP.items():
+                    if k in val_str: 
+                        val = float(v)
+                        break
+            
+            # Fallback numérique
+            try:
+                val = float(val)
+                if np.isnan(val): val = self.medians.get(c, 0)
+            except:
+                val = self.medians.get(c, 0)
+            
+            vals.append(val)
+            
+        raw_cont = np.array(vals, dtype=float).reshape(1, -1)
+        scaled_cont = self.scaler.transform(raw_cont).flatten()
+
+        # 3. CATEGORIES
+        cat_idxs = []
+        for c in self.cat_cols:
+            val = str(row.get(c, "MISSING"))
+            cat_idxs.append(self.cat_mappings[c].get(val, self.cat_mappings[c]["<UNK>"]))
+
+        # 4. IMAGES (Via URL ou Path Local)
+        # TODO: Implémentez votre logique de chargement d'image ici
+        # img_path = row['images_urls']... download or open local
+        img_tensor = torch.zeros((1, 3, 224, 224)) # Dummy placeholder
 
         return {
-            'images': images,
+            'images': img_tensor,
             'input_ids': tokens['input_ids'].squeeze(0),
             'attention_mask': tokens['attention_mask'].squeeze(0),
-            'tab_data': torch.tensor(self.tab_data[idx], dtype=torch.float32),
-            'target': self.targets[idx],
-            'mask': self.masks[idx]
+            'tab_cont': torch.tensor(scaled_cont, dtype=torch.float32),
+            'tab_cat': torch.tensor(cat_idxs, dtype=torch.long),
+            'targets': torch.tensor([row['log_price'], 0.0], dtype=torch.float32),
+            'masks': torch.tensor([1.0, 0.0], dtype=torch.float32)
         }
 
-
-    def _load_images(self, id_str):
-        path = os.path.join(self.img_dir, id_str)
-        tensors = []
-        valid_ext = (".jpg", ".png", ".jpeg")
-
-        if os.path.isdir(path):
-            files = sorted([f for f in os.listdir(path) if f.lower().endswith(valid_ext)])
-
-            for f in files:
-                img = cv2.imread(os.path.join(path, f))
-                if img is not None:
-                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                    img = cv2.resize(img, self.target_size)
-                    img = img.astype(np.float32) / 255.0
-                    # Normalisation ImageNet
-                    img = (img - np.array([0.485, 0.456, 0.406])) / np.array([0.229, 0.224, 0.225])
-                    img = np.transpose(img, (2, 0, 1)) 
-                    tensors.append(torch.tensor(img, dtype=torch.float32))
-
-        if not tensors:
-            tensors.append(torch.zeros(3, *self.target_size))
-
-        return torch.stack(tensors)
-
-
 def real_estate_collate_fn(batch):
-    """
-    Assemble une liste d'éléments individuels en un batch.
-    Gère le padding des images.
-    """
-    # 1. Padding Images
-    max_imgs = max([item['images'].shape[0] for item in batch])
-    img_dims = batch[0]['images'].shape[1:]
-
-    padded_images = []
-    for item in batch:
-        imgs = item['images']
-        diff = max_imgs - imgs.shape[0]
-        if diff > 0:
-            pad = torch.zeros((diff, *img_dims), dtype=torch.float32)
-            imgs = torch.cat([imgs, pad], dim=0)
-        padded_images.append(imgs)
-        
-    images_tensor = torch.stack(padded_images)
-
-    # 2. Stack simple pour le reste
     return {
-        'images': images_tensor,
-        'input_ids': torch.stack([item['input_ids'] for item in batch]),
-        'attention_mask': torch.stack([item['attention_mask'] for item in batch]),
-        'tab_data': torch.stack([item['tab_data'] for item in batch]),
-        'targets': torch.stack([item['target'] for item in batch]),
-        'masks': torch.stack([item['mask'] for item in batch])
+        'images': torch.stack([x['images'] for x in batch]),
+        'input_ids': torch.stack([x['input_ids'] for x in batch]),
+        'attention_mask': torch.stack([x['attention_mask'] for x in batch]),
+        'tab_cont': torch.stack([x['tab_cont'] for x in batch]),
+        'tab_cat': torch.stack([x['tab_cat'] for x in batch]),
+        'targets': torch.stack([x['targets'] for x in batch]),
+        'masks': torch.stack([x['masks'] for x in batch])
     }

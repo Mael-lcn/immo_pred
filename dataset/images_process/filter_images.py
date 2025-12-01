@@ -83,10 +83,10 @@ def process_all(csv_root, images_root, results_root, args):
             listing_id = str(row.get('id','')).strip()
             if not listing_id:
                 continue
-            
+
             images_dir = os.path.join(images_root, listing_id)
             result_dir = str(results_csv_dir / listing_id)
-            
+
             try:
                 num_rooms = int(row.get('num_rooms') or row.get('num_pieces') or 1)
             except Exception:
