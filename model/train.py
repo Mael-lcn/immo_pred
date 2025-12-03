@@ -29,10 +29,10 @@ from torch.utils.data import DataLoader
 from model import SOTARealEstateModel
 
 # Importation des utilitaires de données
-from load_data import (
+from data_loader import (
     RealEstateDataset, 
     real_estate_collate_fn, 
-    prepare_scaler_from_subset, 
+    prepare_preprocessors, 
     get_cols_config
 )
 
@@ -124,20 +124,6 @@ class MaskedLogMSELoss(nn.Module):
 def train_one_epoch(model, dataloader, optimizer, criterion, scaler, device, epoch_index, total_epochs, use_amp=False):
     """
     Exécute une époque complète d'entraînement (Forward + Backward).
-    
-    Args:
-        model (nn.Module): Le modèle SOTA.
-        dataloader (DataLoader): Le chargeur de données PyTorch.
-        optimizer (Optimizer): L'optimiseur (ex: AdamW).
-        criterion (Loss): La fonction de coût.
-        scaler (GradScaler): Scaler pour la précision mixte (Nvidia uniquement).
-        device (torch.device): CPU, CUDA ou MPS.
-        epoch_index (int): Numéro de l'époque actuelle.
-        total_epochs (int): Nombre total d'époques.
-        use_amp (bool): Activer ou non la précision mixte.
-        
-    Returns:
-        float: La perte moyenne sur l'époque.
     """
     model.train() # Met le modèle en mode entraînement (active Dropout, BatchNorm...)
     
@@ -155,11 +141,10 @@ def train_one_epoch(model, dataloader, optimizer, criterion, scaler, device, epo
         targets = batch['targets'].to(device, non_blocking=True)
         masks = batch['masks'].to(device, non_blocking=True)
         
-        # Gestion Tabulaire SOTA : Séparation Continus / Catégoriels
-        # Note : On suppose ici que 'tab_data' contient les continus.
-        # Si vous avez mis à jour load_data.py pour avoir 'cat_data', décommentez la ligne suivante.
-        x_cont = batch['tab_data'].to(device, non_blocking=True)
-        x_cat = batch['cat_data'].to(device, non_blocking=True) if 'cat_data' in batch else None
+        # --- CORRECTION 1 : CLES DICTIONNAIRE ---
+        # On utilise les clés exactes définies dans load_data.py
+        x_cont = batch['tab_cont'].to(device, non_blocking=True)
+        x_cat = batch['tab_cat'].to(device, non_blocking=True)
 
         # --- B. Forward & Backward ---
         optimizer.zero_grad(set_to_none=True) # Reset optimisé des gradients
@@ -167,7 +152,7 @@ def train_one_epoch(model, dataloader, optimizer, criterion, scaler, device, epo
         # Branche 1 : NVIDIA (Mixed Precision)
         if use_amp:
             with torch.amp.autocast('cuda'):
-                # Appel du modèle avec la nouvelle signature
+                # Appel du modèle
                 p_vente, p_loc = model(imgs, input_ids, mask, x_cont=x_cont, x_cat=x_cat)
                 loss = criterion(p_vente, p_loc, targets, masks)
 
@@ -207,8 +192,8 @@ def main():
     parser = argparse.ArgumentParser(description="Entraînement Modèle SOTA Immobilier")
 
     # Chemins des données
-    parser.add_argument('--csv_folder', type=str, default='../output/csv/train', help="Dossier contenant les CSVs d'entraînement")
-    parser.add_argument('--img_dir', type=str, default='../output/images', help="Dossier contenant les images")
+    parser.add_argument('--csv_folder', type=str, default='../output/train', help="Dossier contenant les CSVs d'entraînement")
+    parser.add_argument('--img_dir', type=str, default='../output/filtered_images', help="Dossier contenant les images")
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints_sota', help="Dossier de sauvegarde")
 
     # Hyperparamètres
@@ -240,19 +225,13 @@ def main():
 
     # --- 2. PRÉPARATION DES DONNÉES ---
     print("[DATA] Analyse des fichiers CSV...")
-    try:
-        # On cherche un fichier CSV exemple pour calibrer les colonnes
-        dummy_file = [f for f in os.listdir(args.csv_folder) if f.endswith('.csv')][0]
-    except IndexError:
-        print(f"[ERREUR] Aucun fichier .csv trouvé dans {args.csv_folder}")
-        return
 
     # Récupération de la config des colonnes
-    num_cols, text_cols = get_cols_config(os.path.join(args.csv_folder, dummy_file))
-    
+    num_cols, cat_cols, text_cols = get_cols_config()
+
     # Préparation du scaler (Normalisation des données chiffrées)
-    global_scaler = prepare_scaler_from_subset(args.csv_folder, num_cols)
-    
+    scaler, medians, cat_mappings, cat_dims = prepare_preprocessors(args.csv_folder, num_cols, cat_cols)
+
     # Tokenizer pour le texte
     tokenizer = AutoTokenizer.from_pretrained('almanach/camembert-base')
 
@@ -261,10 +240,11 @@ def main():
         csv_folder=args.csv_folder,
         img_dir=args.img_dir,
         tokenizer=tokenizer,
-        scaler=global_scaler,
-        num_cols=num_cols,
-        text_cols=text_cols,
-        is_train=True # Active l'augmentation de données (Data Augmentation)
+        scaler=scaler,
+        medians=medians,
+        cat_mappings=cat_mappings,
+        cont_cols=num_cols,
+        cat_cols=cat_cols
     )
 
     train_loader = DataLoader(
@@ -279,9 +259,9 @@ def main():
     # --- 3. PRÉPARATION DU MODÈLE SOTA ---
     print("[MODEL] Initialisation de l'architecture SOTA...")
     
-    # TODO : Mettre à jour cat_cardinalities
-    # Exemple : cat_cardinalities=[7] si on a 1 colonne catégorielle avec 7 valeurs uniques
-    current_cat_cardinalities = [] 
+    # --- CORRECTION 2 : DIMENSIONS ---
+    # On passe les dimensions réelles calculées plus haut (cat_dims)
+    current_cat_cardinalities = cat_dims 
 
     model = SOTARealEstateModel(
         num_continuous=len(num_cols),

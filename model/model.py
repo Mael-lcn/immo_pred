@@ -80,20 +80,23 @@ class SOTAFeatureTokenizer(nn.Module):
         tokens = []
 
         # 1. Traitement Périodique des Chiffres
+        # On itère sur les layers disponibles. Si x_cont a plus de colonnes, on ignore le surplus.
         for i, layer in enumerate(self.cont_embeddings):
             val = x_cont[:, i].unsqueeze(1) # [B, 1]
             tokens.append(layer(val).unsqueeze(1)) # [B, 1, Dim]
 
         # 2. Traitement des Catégories
         if x_cat is not None and x_cat.shape[1] > 0:
-            for i, layer in enumerate(self.cat_embeddings):
+            limit = len(self.cat_embeddings)
+            for i in range(min(x_cat.shape[1], limit)):
+                layer = self.cat_embeddings[i]
                 tokens.append(layer(x_cat[:, i]).unsqueeze(1))
 
         # 3. Ajout du CLS
         B = x_cont.shape[0]
         tokens.append(self.cls_token.expand(B, -1, -1))
         
-        return torch.cat(tokens, dim=1) # [B, N_cols+1, Dim]
+        return torch.cat(tokens, dim=1)
 
 
 
@@ -159,7 +162,7 @@ class SOTARealEstateModel(nn.Module):
                  fusion_dim=512,
                  depth=4,
                  freeze_encoders=True):
-        
+
         super().__init__()
 
         # --- A. ENCODEURS (Experts) ---

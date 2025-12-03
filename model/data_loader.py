@@ -42,8 +42,8 @@ def get_cols_config():
     base_cont = [
         'latitude', 'longitude', 
         'living_area_sqm', 'total_land_area_sqm', 
-        'num_rooms', 'num_bedrooms', 'num_bathrooms', 'num_parking_spaces', 'num_floors',
-        'year_built', 
+        'num_rooms', 'num_bedrooms', 'num_bathrooms', 'num_parking_spaces',
+        'year_built',
         'energy_rating', 
         'property_status',
         'dataset_source' # <--- Le modèle doit savoir le type de transaction
@@ -124,6 +124,7 @@ class RealEstateDataset(Dataset):
             try:
                 self.data.append(pd.read_csv(os.path.join(csv_folder, f), sep=None, engine='python'))
             except: pass
+
         self.df = pd.concat(self.data, ignore_index=True)
 
         # --- GESTION DES TARGETS (VENTE vs LOCATION) ---
@@ -163,7 +164,7 @@ class RealEstateDataset(Dataset):
         # Gestion de sécurité si le dossier est vide ou l'ID incorrect malgré la garantie
         if not images: 
             images.append(torch.zeros(3, 224, 224))
-            
+
         return torch.stack(images)
 
 
@@ -172,7 +173,7 @@ class RealEstateDataset(Dataset):
 
         # 1. TEXTE
         text = str(row.get('titre', '')) + " . " + str(row.get('description', ''))
-        tokens = self.tokenizer(text, padding='max_length', truncation=True, max_length=128, return_tensors='pt')
+        tokens = self.tokenizer(text, padding='max_length', truncation=True, max_length=256, return_tensors='pt')
 
         # 2. CONTINUS
         vals = []
@@ -196,7 +197,7 @@ class RealEstateDataset(Dataset):
         target_vec = torch.zeros(2, dtype=torch.float32) # [Log_Vente, Log_Loc]
         mask_vec = torch.zeros(2, dtype=torch.float32)   # [Mask_Vente, Mask_Loc]
 
-        if source == 0: 
+        if source == 0:
             # C'est une VENTE
             target_vec[0] = log_val
             mask_vec[0] = 1.0
