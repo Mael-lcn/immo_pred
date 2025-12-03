@@ -21,6 +21,8 @@ rename_dict = {
     "region": "region",
     "codePostal": "postal_code",
     "departement": "department",
+    "latitude": "latitude",
+    "longitude" : "longitude",
     "nb_pieces": "num_rooms", 
     "nb_chambres": "num_bedrooms", 
     "nb_salleDeBains": "num_bathrooms", 
@@ -30,6 +32,7 @@ rename_dict = {
     "surface_habitable": "living_area_sqm", 
     "surface_tolale_terrain": "total_land_area_sqm", 
     "nb_etages_Immeuble": "building_num_floors", 
+    "acces_exterieur": "outside",
     "annee_construction": "year_built", 
     "specificites": "special_features", 
     "images_urls": "images", 
@@ -85,6 +88,7 @@ def filtre(df):
     df["total_land_area_sqm"] = df["total_land_area_sqm"].fillna(0)
     df["num_parking_spaces"] = df["num_parking_spaces"].fillna(0)
     df["special_features"] = df["special_features"].fillna("No one")
+    df["outside"]=df["outside"].fillna("No one")
 
     df = df.dropna()
 

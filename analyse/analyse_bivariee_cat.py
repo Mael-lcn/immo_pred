@@ -3,11 +3,12 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 
-def boxplot_prix_par_categorie(df, col_cat, y="prix"):
+def boxplot_prix_par_categorie(df, col_cat, y="price"):
     """
     Affiche un boxplot de y en fonction d'une variable catégorielle.
     """
     if col_cat not in df.columns or y not in df.columns:
+        print(df.columns)
         print(f"Colonnes {col_cat} ou {y} absentes du DataFrame.")
         return
 

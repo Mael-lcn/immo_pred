@@ -39,8 +39,29 @@ def showMat_Corr(df,low=0.01, high=0.99):
     plt.tight_layout()
     plt.show()
 
+def showScatters_Plots(df):
+    variables_scatters = [
+        "living_area_sqm",
+        "total_land_area_sqm",
+        "num_rooms",
+        "num_bedrooms",
+        "num_bathrooms",
+        "num_parking_spaces",
+        "year_built",
+    ]
+    # à modiffier
+    for x in variables_scatters:
+        if x in df.columns and "price" in df.columns:
+            print(f"\nScatter plot prix vs {x} (brut vs clean)")
+            show_scatter_raw_vs_clean(df, x, "price") # prix par defaut, mais on pourra peut etre comparé à autre chose
 
-def show_scatter_raw_vs_clean(df, x, y="prix", low=0.01, high=0.99):
+
+
+
+
+            
+
+def show_scatter_raw_vs_clean(df, x, y="price", low=0.01, high=0.99):
     """
     Affiche deux scatter plots côte à côte :
     - à gauche : données brutes

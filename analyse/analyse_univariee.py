@@ -90,6 +90,8 @@ def check_data_quality(df):
 
     print("\n=== Doublons ===")
     print(df.duplicated().sum())
+    print("\n================")
+
 
 
 def showBoxPlots(df,low=0.01,high=0.99):
@@ -97,10 +99,8 @@ def showBoxPlots(df,low=0.01,high=0.99):
     # Creation des box plots pour chaque variable numérique
 
     df_clean = clean_outliers(df, num_cols,low, high)
-
-
     for col in num_cols:
-        print(df[col])
+        #print(df[col])
         plt.figure(figsize=(6, 4))
         plt.boxplot(df_clean[col].dropna())
         plt.title(f"Boxplot de {col}")
@@ -133,10 +133,9 @@ def showCatPlots(df, max_categories=20): # je limite le nombre de categorie pour
 
     # Colonnes à ignorer (trop de modalités)
     filtres_supplementaires = [
-        "specificites",
-        "acces_exterieur",
-        "ville",
-        "nom_vendeur"
+        "special_features",
+        "outside",
+        "city",
     ]
     
     # On retire les colonnes ignorées
@@ -176,15 +175,7 @@ def plot_multilabel_counts(df, col, sep, top=20):
     plt.tight_layout()
     plt.show()
 
-"""
-1er tentative pour analyser les variables multimodales (acces exterieurs et specificities)
-def showAccessExterieurPlot(df):
-    plot_multilabel_counts(df, "acces_exterieur", sep=",", top=20)
 
-
-def showSpecifitiesPlot(df):
-    plot_multilabel_counts(df, "specificites", sep="|", top=20)
-"""
 
 
 def main():
@@ -209,14 +200,12 @@ def main():
     detect_outliers_iqr(df)
     stats_univariees(df)
     
-    #affiche_caracteristique_par_defaut(df)
-    #check_data_quality(df)
-    #showCatPlots(df)
+    affiche_caracteristique_par_defaut(df)
+    check_data_quality(df)
+    showCatPlots(df)
     showBoxPlots(df)   
-    #showHistoPlots(df)
+    showHistoPlots(df)
 
-    #showAccessExterieurPlot(df)
-    #showSpecifitiesPlot(df)     // c'est des versions pas aboutis
 
      
 

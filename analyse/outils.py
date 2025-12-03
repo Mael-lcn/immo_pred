@@ -1,13 +1,14 @@
 import sys
-
 import pandas as pd
+import glob
+import os
 
 def get_variable_types(dataframe: pd.DataFrame):
     """Retourne les listes de colonnes quantitatives et qualitatives filtrés ."""
 
     num_cols = dataframe.select_dtypes(include="number").columns
-    cols_geo = ["latitude", "longitude"]     # on enlève les colonnes latitude et longitude car ce sont des géographiques, il faut les traiter à part
-    cols_id  = ["id","type_quartier_id","id_quartier"]             # identifiants à exclure (on peut pas faire d'études dessus)
+    cols_geo = ["latitude", "longitude","postal_code"]     # on enlève les colonnes latitude et longitude car ce sont des géographiques, il faut les traiter à part
+    cols_id  = ["id","type_quartier_id","id_quartier","dataset_source"]             # identifiants à exclure (on peut pas faire d'études dessus)
     cols_typeVente =["type_vente"] # toujours à 0 car on a que des pros ici
     cols_nums_to_exclude = cols_geo + cols_id +cols_typeVente
     #Colonnes filtrées
@@ -16,7 +17,7 @@ def get_variable_types(dataframe: pd.DataFrame):
     cols_cat_to_ignore = [                                      
         "reference",
         "description",
-        "images_urls",
+        "images",
         "titre",
         "date_publication"
     ]
@@ -85,6 +86,43 @@ def charger_fichier(fichier_csv):
     except Exception as e:
         print(f"Erreur lors de la lecture du fichier : {e}")
         sys.exit(1)
+
+
+
+
+
+
+# ou from .outils import charger_fichier, selon où est la fonction
+
+def load_all_regions(folder_path):
+    csv_files = glob.glob(os.path.join(folder_path, "*.csv"))
+
+    if not csv_files:
+        raise ValueError("Aucun fichier CSV trouvé dans ce dossier.")
+
+    print(f"{len(csv_files)} fichiers trouvés :")
+    for f in csv_files:
+        print(" -", os.path.basename(f))
+
+    df_list = []
+    for file in csv_files:
+        try:
+            # ⬇️ Utilise la même logique que quand tu charges un seul fichier
+            df_temp = charger_fichier(file)
+            region_name = os.path.basename(file).replace(".csv", "")
+            df_temp["region"] = region_name
+            df_list.append(df_temp)
+        except Exception as e:
+            print(f"⚠️ Erreur lors de la lecture de {file} : {e}")
+            # si tu veux ignorer les fichiers cassés, continue
+            continue
+
+    df = pd.concat(df_list, ignore_index=True)
+    print(f"\nDataset fusionné : {df.shape[0]} lignes, {df.shape[1]} colonnes")
+    return df
+
+
+
 
 
 
