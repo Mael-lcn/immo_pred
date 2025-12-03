@@ -78,7 +78,7 @@ class SOTAFeatureTokenizer(nn.Module):
 
     def forward(self, x_cont, x_cat):
         tokens = []
-        
+
         # 1. Traitement Périodique des Chiffres
         for i, layer in enumerate(self.cont_embeddings):
             val = x_cont[:, i].unsqueeze(1) # [B, 1]

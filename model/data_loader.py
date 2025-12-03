@@ -58,7 +58,7 @@ def get_cols_config():
 # ==============================================================================
 def prepare_preprocessors(csv_folder, cont_cols, cat_cols):
     print(f"[PREPROC] Calibration sur {csv_folder}...")
-    
+
     df_list = []
     try:
         files = [os.path.join(csv_folder, f) for f in os.listdir(csv_folder)][:5]
@@ -76,13 +76,12 @@ def prepare_preprocessors(csv_folder, cont_cols, cat_cols):
     # --- SCALER ---
     # On exclut dataset_source du scaling car c'est déjà 0/1 (binaire pur)
     # Mais le StandardScaler gère bien les 0/1, donc on peut tout scaler pour simplifier.
-    valid_cont = [c for c in cont_cols if c in full_df.columns]
-    
-    medians = full_df[valid_cont].median().to_dict()
-    full_df[valid_cont] = full_df[valid_cont].fillna(medians)
+
+    medians = full_df[cont_cols].median().to_dict()
+    full_df[cont_cols] = full_df[cont_cols].fillna(medians)
 
     scaler = StandardScaler()
-    scaler.fit(full_df[valid_cont].values)
+    scaler.fit(full_df[cont_cols].values)
 
     # --- MAPPINGS ---
     cat_mappings = {}
@@ -103,7 +102,7 @@ def prepare_preprocessors(csv_folder, cont_cols, cat_cols):
 # 3. DATASET MULTI-TASK
 # ==============================================================================
 class RealEstateDataset(Dataset):
-    def __init__(self, csv_folder, img_dir, tokenizer, scaler, medians, cat_mappings, cont_cols, cat_cols, is_train=True):
+    def __init__(self, csv_folder, img_dir, tokenizer, scaler, medians, cat_mappings, cont_cols, cat_cols):
         self.img_dir = img_dir
         self.tokenizer = tokenizer
         self.scaler = scaler
@@ -143,17 +142,28 @@ class RealEstateDataset(Dataset):
 
 
     def load_images(self, property_id):
-        clean_id = str(int(float(property_id))) if pd.notna(property_id) else "unknown"
-        folder_path = os.path.join(self.img_dir, clean_id)
+        # ID garanti valide : conversion directe en string pour le chemin
+        folder_path = os.path.join(self.img_dir, str(property_id))
+
         images = []
-        if os.path.isdir(folder_path):
-            files = sorted([f for f in os.listdir(folder_path) if f.lower().endswith(('.jpg', '.png'))])
-            for f in files[:5]:
+
+        # On vérifie juste que le dossier existe avant de lister
+        if os.path.exists(folder_path):
+            # Pas de filtre d'extension, on prend tout le contenu
+            files = sorted(os.listdir(folder_path))
+
+            for f in files:
                 try:
                     with Image.open(os.path.join(folder_path, f)).convert('RGB') as img:
                         images.append(self.transform(img))
-                except: continue
-        if not images: images.append(torch.zeros(3, 224, 224))
+                except: 
+                    continue
+        else:
+            print(f"Erreur: le dossier d'image: {folder_path} n'existe pas")
+        # Gestion de sécurité si le dossier est vide ou l'ID incorrect malgré la garantie
+        if not images: 
+            images.append(torch.zeros(3, 224, 224))
+            
         return torch.stack(images)
 
 
@@ -164,7 +174,7 @@ class RealEstateDataset(Dataset):
         text = str(row.get('titre', '')) + " . " + str(row.get('description', ''))
         tokens = self.tokenizer(text, padding='max_length', truncation=True, max_length=128, return_tensors='pt')
 
-        # 2. CONTINUS (Inclus dataset_source maintenant !)
+        # 2. CONTINUS
         vals = []
         for c in self.cont_cols:
             val = row.get(c, np.nan)
@@ -209,23 +219,50 @@ class RealEstateDataset(Dataset):
         }
 
 
-# --- COLLATE ---
+# ==============================================================================
+# 4. COLLATE FN (Gestion des batchs variables)
+# ==============================================================================
 def real_estate_collate_fn(batch):
-    max_imgs = max([x['images'].shape[0] for x in batch])
-    padded_images = []
-    for x in batch:
-        imgs = x['images']
-        if imgs.shape[0] < max_imgs:
-            pad = torch.zeros((max_imgs - imgs.shape[0], 3, 224, 224))
-            imgs = torch.cat([imgs, pad], dim=0)
-        padded_images.append(imgs)
-        
+    """
+    Gère le padding dynamique des images pour qu'elles aient toutes la même dimension
+    dans un batch donné.
+    """
+    # 1. Trouver le nombre max d'images dans CE batch
+    img_lengths = [x['images'].shape[0] for x in batch]
+    max_imgs = max(img_lengths)
+
+    batch_size = len(batch)
+
+    # 2. Préparer les tenseurs de réception
+    # Shape: (Batch, Max_Images, Channels, H, W)
+    padded_images = torch.zeros(batch_size, max_imgs, 3, 224, 224) 
+
+    # Masque pour dire au modèle : 1=Vraie image, 0=Padding
+    # Shape: (Batch, Max_Images)
+    image_masks = torch.zeros(batch_size, max_imgs)
+
+    # 3. Remplissage
+    for i, x in enumerate(batch):
+        imgs = x['images'] # Tenseur de forme (N, 3, 224, 224)
+        num_imgs = imgs.shape[0]
+    
+        # On copie les images réelles au début du tenseur vide
+        padded_images[i, :num_imgs] = imgs
+    
+        # On met le masque à 1 pour les vraies images
+        image_masks[i, :num_imgs] = 1.0
+
+    # 4. Stack des autres données
     return {
-        'images': torch.stack(padded_images),
+        'images': padded_images,          # (B, N_max, 3, 224, 224)
+        'image_masks': image_masks,       # (B, N_max)
+
         'input_ids': torch.stack([x['input_ids'] for x in batch]),
         'attention_mask': torch.stack([x['attention_mask'] for x in batch]),
+
         'tab_cont': torch.stack([x['tab_cont'] for x in batch]),
         'tab_cat': torch.stack([x['tab_cat'] for x in batch]),
+
         'targets': torch.stack([x['targets'] for x in batch]),
         'masks': torch.stack([x['masks'] for x in batch])
     }

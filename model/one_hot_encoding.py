@@ -8,6 +8,8 @@ import multiprocessing
 from functools import partial
 import csv
 
+from sklearn.preprocessing import StandardScaler
+
 
 
 # Définition des colonnes OHE à retirer du vocabulaire final des FEATURES
