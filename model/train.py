@@ -1,21 +1,10 @@
 """
-train.py
+train.py - Script d'entraînement SOTA Corrigé.
 
-Script d'entraînement principal pour le modèle d'estimation immobilière SOTA (State-of-the-Art).
-
-Fonctionnalités :
-- Gestion automatique du matériel : Nvidia (CUDA), Apple Silicon (MPS), ou CPU.
-- Entraînement en Précision Mixte (AMP) pour accélérer et réduire la mémoire.
-- Monitoring complet : Sauvegarde des courbes de perte (PNG) et des logs (JSON) en temps réel.
-- Compatibilité avec l'architecture FT-Transformer (séparation données continues/catégorielles).
-
-Usage :
-    python train.py --epochs 20 --batch_size 16 --lr 5e-5
 """
 
 import os
 import json
-import multiprocessing
 import argparse
 import torch
 import torch.nn as nn
@@ -25,10 +14,8 @@ from tqdm import tqdm
 from transformers import AutoTokenizer
 from torch.utils.data import DataLoader
 
-# Importation de l'architecture SOTA définie dans model.py
 from model import SOTARealEstateModel
 
-# Importation des utilitaires de données
 from data_loader import (
     RealEstateDataset, 
     real_estate_collate_fn, 
@@ -38,134 +25,106 @@ from data_loader import (
 
 
 
-# Configuration Matplotlib : Backend 'agg' pour générer des graphiques sans écran (serveur/headless)
+# Backend pour graphiques sans écran
 plt.switch_backend('agg')
 
 
 # ==============================================================================
-# 1. UTILITAIRES DE MONITORING
+# 1. MONITORING & SAUVEGARDE
 # ==============================================================================
 def save_monitoring(history, checkpoint_dir):
-    """
-    Génère et sauvegarde les fichiers de suivi de l'entraînement.
-    
-    Args:
-        history (dict): Dictionnaire contenant les listes 'epoch' et 'loss'.
-        checkpoint_dir (str): Chemin du dossier où sauvegarder les fichiers.
-    """
-    # 1. Sauvegarde des données brutes en JSON (pour analyse future ou reprise)
     json_path = os.path.join(checkpoint_dir, "training_history.json")
     with open(json_path, 'w') as f:
         json.dump(history, f, indent=4)
 
-    # 2. Génération du Graphique de Convergence
     epochs = history['epoch']
     losses = history['loss']
 
     plt.figure(figsize=(10, 6))
     plt.plot(epochs, losses, marker='o', linestyle='-', color='#1f77b4', label='Training Loss')
-    
-    plt.title(f"Convergence du modèle SOTA (Epoch {epochs[-1]})")
+    plt.title(f"Convergence SOTA (Epoch {epochs[-1]})")
     plt.xlabel("Époques")
     plt.ylabel("Loss (Masked LogMSE)")
-    plt.grid(True, which='both', linestyle='--', alpha=0.7)
+    plt.grid(True, linestyle='--', alpha=0.7)
     plt.legend()
     plt.tight_layout()
-
-    # Sauvegarde de l'image
-    plot_path = os.path.join(checkpoint_dir, "convergence_plot.png")
-    plt.savefig(plot_path)
-    plt.close() # Important : Libère la mémoire graphique
+    plt.savefig(os.path.join(checkpoint_dir, "convergence_plot.png"))
+    plt.close()
 
 
 # ==============================================================================
-# 2. FONCTION DE PERTE (LOSS)
+# 2. LOSS FUNCTION (Log-Space)
 # ==============================================================================
 class MaskedLogMSELoss(nn.Module):
-    """
-    Fonction de perte robuste qui gère les données manquantes.
-    Si une cible (Vente ou Location) est manquante (valeur 0 ou -1), elle est ignorée.
-    """
     def __init__(self):
         super().__init__()
-        # 'none' permet de garder l'erreur pour chaque élément du batch avant de masquer
         self.mse = nn.MSELoss(reduction='none')
 
     def forward(self, pred_vente, pred_loc, targets, masks):
-        """
-        Calcule la MSE uniquement sur les cibles valides.
+        # pred_vente/loc sont des LOGS de prix
+        # targets sont aussi des LOGS de prix (fait dans le DataLoader)
         
-        Args:
-            pred_vente (Tensor): Prédictions log prix vente [Batch, 1]
-            pred_loc (Tensor): Prédictions log loyer [Batch, 1]
-            targets (Tensor): Vraies valeurs (logs) [Batch, 2]
-            masks (Tensor): Masque binaire (1 si présent, 0 si absent) [Batch, 2]
-        
-        Returns:
-            Tensor: Scalaire représentant la perte moyenne.
-        """
-        # On concatène les deux prédictions pour matcher la forme des targets [Batch, 2]
-        preds = torch.cat([pred_vente, pred_loc], dim=1)
-        
-        # Calcul de l'erreur quadratique
+        preds = torch.cat([pred_vente, pred_loc], dim=1) # [B, 2]
         raw_loss = self.mse(preds, targets)
-        
-        # Application du masque : on met à 0 l'erreur des données manquantes
+
+        # On applique le masque (0 si donnée manquante)
         masked_loss = raw_loss * masks
-        
-        # On fait la moyenne uniquement sur les éléments présents
-        # (masks.sum() compte le nombre de valeurs valides)
+
+        # Moyenne uniquement sur les valeurs présentes
         return masked_loss.sum() / (masks.sum() + 1e-8)
 
 
 # ==============================================================================
-# 3. BOUCLE D'ENTRAÎNEMENT (UNE ÉPOQUE)
+# 3. BOUCLE D'ENTRAÎNEMENT
 # ==============================================================================
 def train_one_epoch(model, dataloader, optimizer, criterion, scaler, device, epoch_index, total_epochs, use_amp=False):
-    """
-    Exécute une époque complète d'entraînement (Forward + Backward).
-    """
-    model.train() # Met le modèle en mode entraînement (active Dropout, BatchNorm...)
+    model.train()
     
-    # Barre de progression
     loop = tqdm(dataloader, desc=f"Ep {epoch_index}/{total_epochs}")
     total_loss = 0
     count = 0
 
     for batch in loop:
-        # --- A. Transfert des données sur le GPU/MPS ---
-        # non_blocking=True accélère le transfert RAM -> VRAM
+        # --- A. Transfert GPU ---
+        # Vision
         imgs = batch['images'].to(device, non_blocking=True)
-        input_ids = batch['input_ids'].to(device, non_blocking=True)
-        mask = batch['attention_mask'].to(device, non_blocking=True)
-        targets = batch['targets'].to(device, non_blocking=True)
-        masks = batch['masks'].to(device, non_blocking=True)
+        img_masks = batch['image_masks'].to(device, non_blocking=True)
         
-        # --- CORRECTION 1 : CLES DICTIONNAIRE ---
-        # On utilise les clés exactes définies dans load_data.py
+        # Texte
+        input_ids = batch['input_ids'].to(device, non_blocking=True)
+        text_mask = batch['attention_mask'].to(device, non_blocking=True)
+        
+        # Tabulaire
         x_cont = batch['tab_cont'].to(device, non_blocking=True)
         x_cat = batch['tab_cat'].to(device, non_blocking=True)
 
-        # --- B. Forward & Backward ---
-        optimizer.zero_grad(set_to_none=True) # Reset optimisé des gradients
+        # Targets
+        targets = batch['targets'].to(device, non_blocking=True)
+        masks = batch['masks'].to(device, non_blocking=True)
 
-        # Branche 1 : NVIDIA (Mixed Precision)
-        if use_amp:
-            with torch.amp.autocast('cuda'):
-                # Appel du modèle
-                p_vente, p_loc = model(imgs, input_ids, mask, x_cont=x_cont, x_cat=x_cat)
-                loss = criterion(p_vente, p_loc, targets, masks)
+        # --- B. Forward / Backward ---
+        optimizer.zero_grad(set_to_none=True)
 
-            # Backpropagation avec scaling (évite underflow des gradients float16)
+        # Contexte AMP (Mixed Precision)
+        with torch.amp.autocast('cuda' if use_amp else 'cpu', enabled=use_amp):
+            
+            # Note: Le modèle doit retourner les LOGS (pas torch.exp)
+            p_vente, p_loc, _ = model(
+                imgs, 
+                img_masks,
+                input_ids, 
+                text_mask, 
+                x_cont, 
+                x_cat
+            )
+
+            loss = criterion(p_vente, p_loc, targets, masks)
+
+        if scaler:
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
-
-        # Branche 2 : MAC / CPU (Précision standard Float32)
         else:
-            p_vente, p_loc = model(imgs, input_ids, mask, x_cont=x_cont, x_cat=x_cat)
-            loss = criterion(p_vente, p_loc, targets, masks)
-            
             loss.backward()
             optimizer.step()
 
@@ -173,155 +132,125 @@ def train_one_epoch(model, dataloader, optimizer, criterion, scaler, device, epo
         loss_val = loss.item()
         total_loss += loss_val
         count += 1
-
-        # Mise à jour de la barre de progression
         loop.set_postfix(loss=f"{loss_val:.4f}", avg=f"{total_loss/count:.4f}")
 
-    # Retourne la moyenne de la loss sur l'époque
     return total_loss / count if count > 0 else 0.0
 
 
 # ==============================================================================
-# 4. FONCTION PRINCIPALE (MAIN)
+# 4. MAIN
 # ==============================================================================
 def main():
-    """
-    Point d'entrée du script. 
-    Parse les arguments, initialise le modèle et lance la boucle d'entraînement.
-    """
-    parser = argparse.ArgumentParser(description="Entraînement Modèle SOTA Immobilier")
-
-    # Chemins des données
-    parser.add_argument('--csv_folder', type=str, default='../output/train', help="Dossier contenant les CSVs d'entraînement")
-    parser.add_argument('--img_dir', type=str, default='../output/filtered_images', help="Dossier contenant les images")
-    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints_sota', help="Dossier de sauvegarde")
-
-    # Hyperparamètres
-    parser.add_argument('--batch_size', type=int, default=8, help="Taille du batch (réduire si OOM)")
-    parser.add_argument('--epochs', type=int, default=20, help="Nombre d'époques")
-    parser.add_argument('--lr', type=float, default=1e-4, help="Learning Rate (plus faible pour le Fine-Tuning)")
-    parser.add_argument('--workers', type=int, default=max(1, multiprocessing.cpu_count()//2), help="Nombre de threads CPU pour charger les données")
-
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--csv_folder', type=str, default='../output/train')
+    parser.add_argument('--img_dir', type=str, default='../output/filtered_images')
+    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
+    parser.add_argument('--batch_size', type=int, default=16)
+    parser.add_argument('--epochs', type=int, default=30)
+    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--workers', type=int, default=4)
     args = parser.parse_args()
 
-    # Création du dossier de sauvegarde
     os.makedirs(args.checkpoint_dir, exist_ok=True)
 
-    # --- 1. DÉTECTION DU MATÉRIEL ---
+    # 1. Hardware
     if torch.cuda.is_available():
         device = torch.device("cuda")
-        use_amp = True 
-        print("[INIT] Mode: NVIDIA CUDA (Mixed Precision ON)")
+        use_amp = True
+        print("[INIT] Mode: NVIDIA CUDA (AMP On)")
     elif torch.backends.mps.is_available():
         device = torch.device("mps")
-        use_amp = False 
+        use_amp = False # MPS gère mal l'AMP
         print("[INIT] Mode: APPLE METAL (MPS)")
     else:
         device = torch.device("cpu")
         use_amp = False
-        print("[INIT] Mode: CPU (Attention c'est lent)")
+        print("[INIT] Mode: CPU")
 
-    print(f"[CONF] Batch={args.batch_size} | LR={args.lr} | Workers={args.workers}")
+    # 2. Data & Preprocessors
+    print("[DATA] Calibration...")
+    cont_cols, cat_cols, text_cols = get_cols_config()
 
-    # --- 2. PRÉPARATION DES DONNÉES ---
-    print("[DATA] Analyse des fichiers CSV...")
+    # Récupération des dims, y compris pour les binaires qui sont dans cat_dims
+    scaler_obj, medians, cat_mappings, cat_dims = prepare_preprocessors(args.csv_folder, cont_cols, cat_cols)
 
-    # Récupération de la config des colonnes
-    num_cols, cat_cols, text_cols = get_cols_config()
-
-    # Préparation du scaler (Normalisation des données chiffrées)
-    scaler, medians, cat_mappings, cat_dims = prepare_preprocessors(args.csv_folder, num_cols, cat_cols)
-
-    # Tokenizer pour le texte
     tokenizer = AutoTokenizer.from_pretrained('almanach/camembert-base')
 
-    print("[DATA] Chargement du Dataset...")
     train_ds = RealEstateDataset(
         csv_folder=args.csv_folder,
         img_dir=args.img_dir,
         tokenizer=tokenizer,
-        scaler=scaler,
+        scaler=scaler_obj,
         medians=medians,
         cat_mappings=cat_mappings,
-        cont_cols=num_cols,
+        cont_cols=cont_cols,
         cat_cols=cat_cols
     )
 
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
-        shuffle=True, # Important : Mélanger les données à chaque époque
+        shuffle=True,
         num_workers=args.workers,
         collate_fn=real_estate_collate_fn,
         pin_memory=True
     )
 
-    # --- 3. PRÉPARATION DU MODÈLE SOTA ---
-    print("[MODEL] Initialisation de l'architecture SOTA...")
+    # 3. Model
+    print(f"[MODEL] Init SOTA... (Tab Continuous: {len(cont_cols)}, Tab Categorical: {len(cat_dims)})")
     
-    # --- CORRECTION 2 : DIMENSIONS ---
-    # On passe les dimensions réelles calculées plus haut (cat_dims)
-    current_cat_cardinalities = cat_dims 
-
     model = SOTARealEstateModel(
-        num_continuous=len(num_cols),
-        cat_cardinalities=current_cat_cardinalities,
+        num_continuous=len(cont_cols),
+        cat_cardinalities=cat_dims, # Contient les dims de Orientation, Type ET des Binaires
         img_model_name='convnext_large.fb_in1k',
         text_model_name='almanach/camembert-base',
         fusion_dim=512,
-        depth=4,                # Profondeur du Transformer de fusion
-        freeze_encoders=True    # On commence avec les experts gelés
+        depth=4,
+        freeze_encoders=True
     ).to(device)
 
-    # Initialisation intelligente des biais de la dernière couche
-    # Cela aide le modèle à converger plus vite en partant de la moyenne des prix
-    # log(300 000) ~ 12.7  |  log(1000) ~ 7.0
-    model.head_price[-1].bias.data.fill_(12.7)
-    model.head_rent[-1].bias.data.fill_(7.0)
+    # On compile uniquement si on est sur GPU NVIDIA (Linux/Windows)
+    if torch.cuda.is_available():
+        print("[OPTIM] Compilation du modèle avec torch.compile (Mode: default)...")
+        try:
+            # 'default' est le meilleur équilibre compilation/vitesse
+            # 'reduce-overhead' est plus rapide mais consomme bcp de RAM au début
+            model = torch.compile(model) 
+        except Exception as e:
+            print(f"[WARNING] Impossible de compiler : {e}")
+            print("Passage en mode standard (Eager execution).")
 
-    # Optimiseur
+    # Initialisation Bias (Log Space)
+    # Log(250,000) ~= 12.4
+    model.head_price[-1].bias.data.fill_(12.4)
+    # Log(800) ~= 6.7
+    model.head_rent[-1].bias.data.fill_(6.7)
+
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-
-    # Fonction de coût
     criterion = MaskedLogMSELoss()
+    scaler_amp = torch.amp.GradScaler('cuda') if use_amp else None
 
-    # Scaler (uniquement utile pour Nvidia/CUDA)
-    scaler = torch.amp.GradScaler('cuda') if use_amp else None
-
-    # Historique pour le monitoring
+    # 4. Loop
     history = {'epoch': [], 'loss': []}
 
-    # --- 4. BOUCLE D'ENTRAÎNEMENT ---
-    print(f"\n[TRAIN] Démarrage de l'entraînement pour {args.epochs} époques...")
+    print(f"\n[TRAIN] Début entraînement sur {len(train_ds)} biens.")
 
     for epoch in range(1, args.epochs+1):
         avg_loss = train_one_epoch(
-            model=model,
-            dataloader=train_loader,
-            optimizer=optimizer,
-            criterion=criterion,
-            scaler=scaler,
-            device=device,
-            epoch_index=epoch,
-            total_epochs=args.epochs,
-            use_amp=use_amp
+            model, train_loader, optimizer, criterion, 
+            scaler_amp, device, epoch, args.epochs, use_amp
         )
 
-        print(f"Epoch {epoch} terminée. Loss Moyenne: {avg_loss:.4f}")
-
-        # --- Monitoring ---
         history['epoch'].append(epoch)
         history['loss'].append(avg_loss)
         save_monitoring(history, args.checkpoint_dir)
-        print(f"-> Monitoring mis à jour : {args.checkpoint_dir}/convergence_plot.png")
 
-        # --- Sauvegarde ---
-        # On garde tout mais seul le dernier est utile
-        save_path = os.path.join(args.checkpoint_dir, f"model_ep{epoch}.pt")
-        torch.save(model.state_dict(), save_path)
-        print(f"-> Checkpoint sauvegardé : {save_path}\n")
+        # Sauvegarde régulière
+        if epoch % 5 == 0 or epoch == args.epochs:
+            torch.save(model.state_dict(), os.path.join(args.checkpoint_dir, f"model_ep{epoch}.pt"))
+            print(f"-> Checkpoint saved: model_ep{epoch}.pt")
 
-    print("[FIN] Entraînement terminé avec succès.")
+    print("[FIN] Terminé.")
 
 
 if __name__ == "__main__":

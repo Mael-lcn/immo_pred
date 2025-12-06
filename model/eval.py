@@ -1,84 +1,234 @@
 """
-Script complet d'évaluation (Inférence) - Version SOTA
-Compatible : Mac (MPS), Nvidia (CUDA), CPU.
-Fonctionnalités :
-- Charge un checkpoint (.pth) de l'architecture SOTA
-- Gère la séparation Continus/Catégoriels
-- Calcule MAE, RMSE, R^2 (sur les prix réels en €)
-- Génère des graphiques "Prédiction vs Réalité"
+evaluate_with_attention.py - V2 : Images + Texte + TABULAIRE.
+
+Nouveautés :
+- Visualisation "Feature Importance" pour les données tabulaires (via Gradients).
+- Visualisation "Attention" pour les Images et le Texte.
+- Calcul des métriques globales.
 """
 
 import os
-import argparse, multiprocessing
+import argparse
+import multiprocessing
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+import seaborn as sns
 from tqdm import tqdm
 from transformers import AutoTokenizer
 from torch.utils.data import DataLoader
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
-# --- IMPORT DU NOUVEAU MODÈLE SOTA ---
-from model import SOTARealEstateModel
-from load_data import (
-    RealEstateDataset, 
-    real_estate_collate_fn, 
-    prepare_scaler_from_subset, 
-    get_cols_config
-)
+# Mode silencieux
+plt.switch_backend('agg')
+
+# --- IMPORTS LOCAUX ---
+try:
+    from model import SOTARealEstateModel
+    from data_loader import (
+        RealEstateDataset, 
+        real_estate_collate_fn, 
+        prepare_preprocessors, 
+        get_cols_config
+    )
+except ImportError as e:
+    print(f"ERREUR D'IMPORT : {e}")
+    exit(1)
 
 
-
-# --- 1. FONCTION D'INFÉRENCE ---
-def run_inference(model, dataloader, device):
+# ==============================================================================
+# 1. VISUALISATION COMPLETE (Attention + Features)
+# ==============================================================================
+def save_full_analysis(images, input_ids, 
+                       attn_img, attn_txt, 
+                       feature_grads, feature_names,
+                       pred_price, real_price, 
+                       batch_idx, sample_idx, save_dir, tokenizer):
     """
-    Parcourt le dataset de test et récupère les prédictions et les cibles.
-    Le modèle SOTA gère lui-même la conversion Log -> Euros en mode eval().
+    Génère une planche complète : Attention Images/Texte + Importance Tabulaire.
     """
+    # Config Image
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+    num_imgs = images.shape[0]
+
+    # Création de la figure (Plus grande pour tout contenir)
+    fig = plt.figure(figsize=(20, 10))
+    
+    # Grille : Haut = Images/Texte | Bas = Features Tabulaires
+    gs_top = gridspec.GridSpec(1, num_imgs + 1, width_ratios=[1]*num_imgs + [2])
+    gs_bottom = gridspec.GridSpec(1, 1)
+    
+    # Positionnement
+    gs_top.update(bottom=0.45, top=0.95)     # Partie haute
+    gs_bottom.update(bottom=0.05, top=0.35)  # Partie basse
+
+    # --- A. ATTENTION IMAGES (Partie Haute Gauche) ---
+    if attn_img.max() > 0:
+        norm_scores = (attn_img - attn_img.min()) / (attn_img.max() - attn_img.min() + 1e-6)
+    else:
+        norm_scores = attn_img
+
+    for i in range(num_imgs):
+        ax = plt.subplot(gs_top[i])
+        img = images[i].cpu() * std + mean
+        img = img.permute(1, 2, 0).numpy()
+        img = np.clip(img, 0, 1)
+        
+        ax.imshow(img)
+        
+        # Cadre couleur
+        importance = norm_scores[i].item()
+        color = plt.cm.coolwarm(importance)
+        linewidth = 2 + (importance * 5)
+        
+        for spine in ax.spines.values():
+            spine.set_edgecolor(color)
+            spine.set_linewidth(linewidth)
+        
+        ax.set_title(f"Img {i+1}\nScore: {attn_img[i].item():.2f}", color=color, fontweight='bold', fontsize=9)
+        ax.axis('off')
+
+    # --- B. INFO TEXTE (Partie Haute Droite) ---
+    ax_txt = plt.subplot(gs_top[-1])
+    ax_txt.axis('off')
+    full_text = tokenizer.decode(input_ids, skip_special_tokens=True)
+    display_text = (full_text[:300] + '...') if len(full_text) > 300 else full_text
+    
+    error_pct = abs(pred_price - real_price) / (real_price + 1) * 100
+    color_res = 'green' if error_pct < 10 else 'red'
+
+    info_str = (
+        f"PRIX PREDIT : {pred_price:,.0f} €\n"
+        f"PRIX REEL   : {real_price:,.0f} €\n"
+        f"ERREUR      : {error_pct:.2f} %\n\n"
+        f"IMPORTANCE GLOBALE :\n"
+        f" - Images : {attn_img.sum():.3f}\n"
+        f" - Texte  : {attn_txt:.3f}\n"
+        f"-----------------\n"
+        f"{display_text}"
+    )
+    ax_txt.text(0.0, 0.5, info_str, va='center', ha='left', fontsize=12, fontfamily='monospace',
+                bbox=dict(facecolor='white', alpha=0.9, edgecolor=color_res, boxstyle='round,pad=1'))
+
+    # --- C. IMPORTANCE TABULAIRE (Partie Basse) ---
+    ax_feat = plt.subplot(gs_bottom[0])
+    
+    # On trie les features par importance
+    indices = np.argsort(feature_grads)[::-1] # Décroissant
+    sorted_grads = np.array(feature_grads)[indices]
+    sorted_names = np.array(feature_names)[indices]
+    
+    # Barplot
+    sns.barplot(x=sorted_names, y=sorted_grads, ax=ax_feat, palette="viridis", hue=sorted_names, legend=False)
+    ax_feat.set_title("IMPORTANCE DES CARACTÉRISTIQUES (Impact sur le prix)", fontsize=14, fontweight='bold')
+    ax_feat.set_ylabel("Sensibilité (Gradient)", fontsize=10)
+    ax_feat.tick_params(axis='x', rotation=45, labelsize=9)
+    ax_feat.grid(axis='y', linestyle='--', alpha=0.5)
+
+    # Sauvegarde
+    filename = f"analyse_batch{batch_idx}_sample{sample_idx}.png"
+    plt.savefig(os.path.join(save_dir, filename), dpi=100)
+    plt.close()
+
+
+# ==============================================================================
+# 2. MOTEUR D'ANALYSE
+# ==============================================================================
+def run_eval_and_explain(model, dataloader, device, tokenizer, output_dir, feature_names, max_visu_batches=5):
     model.eval()
+    attn_dir = os.path.join(output_dir, "attention_analysis")
+    os.makedirs(attn_dir, exist_ok=True)
 
-    # Listes pour stocker les résultats
     preds_vente, targets_vente = [], []
     preds_loc, targets_loc = [], []
 
-    print(f"[INFO] Démarrage de l'inférence sur {len(dataloader)} batchs...")
+    print(f"[INFO] Analyse visuelle (Images + Tabulaire) sur les {max_visu_batches} premiers batchs...")
 
-    with torch.no_grad(): # Désactive le calcul de gradient (économise mémoire/temps)
-        for batch in tqdm(dataloader, desc="Évaluation"):
-            # 1. Transfert sur GPU/MPS
-            imgs = batch['images'].to(device, non_blocking=True)
-            input_ids = batch['input_ids'].to(device, non_blocking=True)
-            mask = batch['attention_mask'].to(device, non_blocking=True)
+    for batch_idx, batch in enumerate(tqdm(dataloader, desc="Evaluation")):
+        
+        imgs = batch['images'].to(device, non_blocking=True)
+        input_ids = batch['input_ids'].to(device, non_blocking=True)
+        mask = batch['attention_mask'].to(device, non_blocking=True)
+        x_cat = batch['tab_cat'].to(device, non_blocking=True)
+        targets = batch['targets'].to(device, non_blocking=True)
+        masks = batch['masks'].to(device, non_blocking=True)
+        
+        # --- ASTUCE POUR TABULAR IMPORTANCE ---
+        x_cont = batch['tab_cont'].to(device, non_blocking=True).clone().detach()
+        x_cont.requires_grad = True
+
+        # --- FORWARD ---
+        with torch.set_grad_enabled(True):
+            p_vente, p_loc, attentions = model(imgs, input_ids, mask, x_cont, x_cat, return_attn=True)
             
-            # --- MODIFICATION SOTA : Séparation des entrées ---
-            # tab_data contient les données continues
-            x_cont = batch['tab_data'].to(device, non_blocking=True)
-            # cat_data contient les données catégorielles (si elles existent)
-            x_cat = batch['cat_data'].to(device, non_blocking=True) if 'cat_data' in batch else None
+            # --- CALCUL DU GRADIENT (Feature Importance) ---
+            if batch_idx < max_visu_batches:
+                score_to_explain = (p_vente * masks[:, 0].unsqueeze(1)).sum() + (p_loc * masks[:, 1].unsqueeze(1)).sum()
+                score_to_explain.backward(retain_graph=True)
+                gradients = x_cont.grad.abs().cpu().numpy() 
+                
+                x_cont.requires_grad = False
+                model.zero_grad()
 
-            targets = batch['targets'].to(device, non_blocking=True) # [batch, 2]
-            masks = batch['masks'].to(device, non_blocking=True)     # [batch, 2]
+        # --- VISUALISATION ---
+        if batch_idx < max_visu_batches:
+            with torch.no_grad(): 
+                # === CORRECTION ICI ===
+                last_attn = attentions[-1] 
+                if last_attn.dim() == 4: # Si (Batch, Heads, Q, K)
+                    last_attn = last_attn.mean(dim=1) 
+                # Maintenant last_attn est (Batch, Q, K)
+                # =======================
 
-            # 2. Prédiction du modèle
-            # Le modèle SOTA en mode eval() renvoie déjà des Euros (pas des logs)
-            p_vente_euro, p_loc_euro = model(imgs, input_ids, mask, x_cont=x_cont, x_cat=x_cat)
+                p_v_np = p_vente.detach().cpu().numpy().flatten()
+                p_l_np = p_loc.detach().cpu().numpy().flatten()
+                t_v_np = torch.exp(targets[:, 0]).detach().cpu().numpy().flatten()
+                t_l_np = torch.exp(targets[:, 1]).detach().cpu().numpy().flatten()
 
-            # 3. Récupération des valeurs (déjà en Euros côté modèle)
-            curr_p_vente = p_vente_euro.cpu().numpy().flatten()
-            curr_p_loc = p_loc_euro.cpu().numpy().flatten()
+                for i in range(imgs.shape[0]):
+                    is_vente = masks[i, 0] > 0
+                    is_loc = masks[i, 1] > 0
+                    if not (is_vente or is_loc): continue
 
-            # 4. Conversion des Targets (qui elles sont toujours en log dans le dataset)
-            curr_t_vente = torch.exp(targets[:, 0]).cpu().numpy().flatten()
-            curr_t_loc = torch.exp(targets[:, 1]).cpu().numpy().flatten()
-            
+                    # 1. Attention Images/Texte (Cross-Attention)
+                    # last_attn est [B, Q, K]
+                    # On prend l'index i du batch, le dernier élément Q, et tout K
+                    cls_attn = last_attn[i, -1, :] 
+                    
+                    attn_imgs = cls_attn[:-1]
+                    attn_txt = cls_attn[-1]
+
+                    # 2. Importance Tabulaire (Gradients)
+                    feat_grads = gradients[i]
+
+                    # Prix
+                    real_p = t_v_np[i] if is_vente else t_l_np[i]
+                    pred_p = p_v_np[i] if is_vente else p_l_np[i]
+
+                    # Génération Image
+                    save_full_analysis(
+                        imgs[i], input_ids[i], 
+                        attn_imgs, attn_txt, 
+                        feat_grads, feature_names,
+                        pred_p, real_p, 
+                        batch_idx, i, attn_dir, tokenizer
+                    )
+
+        # --- STOCKAGE MÉTRIQUES ---
+        with torch.no_grad():
             mask_vente = masks[:, 0].cpu().numpy().astype(bool)
             mask_loc = masks[:, 1].cpu().numpy().astype(bool)
+            
+            curr_p_vente = p_vente.detach().cpu().numpy().flatten()
+            curr_p_loc = p_loc.detach().cpu().numpy().flatten()
+            curr_t_vente = torch.exp(targets[:, 0]).cpu().numpy().flatten()
+            curr_t_loc = torch.exp(targets[:, 1]).cpu().numpy().flatten()
 
-            # 5. Stockage (Uniquement si la donnée existe)
             if mask_vente.any():
                 preds_vente.extend(curr_p_vente[mask_vente])
                 targets_vente.extend(curr_t_vente[mask_vente])
-            
             if mask_loc.any():
                 preds_loc.extend(curr_p_loc[mask_loc])
                 targets_loc.extend(curr_t_loc[mask_loc])
@@ -87,161 +237,87 @@ def run_inference(model, dataloader, device):
            (np.array(preds_loc), np.array(targets_loc))
 
 
-# --- 2. CALCUL MÉTRIQUES ET AFFICHAGE ---
-def print_metrics_and_plot(preds, targets, category_name, save_dir="evaluation_results"):
-    if len(preds) == 0:
-        print(f"\n--- {category_name} : Aucune donnée trouvée ---")
-        return
+# ==============================================================================
+# 3. METRIQUES
+# ==============================================================================
+def save_metrics(preds, targets, cat_name, output_dir):
+    mask = np.isfinite(preds) & np.isfinite(targets)
+    p_clean = preds[mask]
+    t_clean = targets[mask]
 
-    # On crée un masque pour garder seulement les valeurs finies
-    mask_clean = np.isfinite(preds) & np.isfinite(targets)
-    
-    # On filtre
-    preds_clean = preds[mask_clean]
-    targets_clean = targets[mask_clean]
+    if len(p_clean) == 0: return
 
-    # On vérifie combien on a rejeté
-    rejected = len(preds) - len(preds_clean)
-    if rejected > 0:
-        print(f"[ATTENTION] {rejected} valeurs aberrantes (Inf/NaN) ignorées pour {category_name}.")
+    mae = mean_absolute_error(t_clean, p_clean)
+    r2 = r2_score(t_clean, p_clean)
 
-    if len(preds_clean) == 0:
-        print(f"[ERREUR] Toutes les prédictions sont invalides pour {category_name}.")
-        return
+    print(f"\n>>> RÉSULTATS {cat_name}")
+    print(f"    R² : {r2:.4f}")
+    print(f"    MAE: {mae:,.0f} €")
 
-    # Création du dossier de résultats
-    os.makedirs(save_dir, exist_ok=True)
-
-    # Calcul des métriques sur les données nettoyées
-    mae = mean_absolute_error(targets_clean, preds_clean)
-    mse = mean_squared_error(targets_clean, preds_clean)
-    rmse = np.sqrt(mse)
-    r2 = r2_score(targets_clean, preds_clean)
-
-    # Affichage Console
-    print(f"\n" + "="*40)
-    print(f" RÉSULTATS : {category_name}")
-    print(f"="*40)
-    print(f"Nombre d'échantillons valides : {len(preds_clean)} (Total: {len(preds)})")
-    print(f"MAE (Erreur Moyenne)  : {mae:,.2f} €")
-    print(f"RMSE (Erreur Quadr.)  : {rmse:,.2f} €")
-    print(f"R² Score              : {r2:.4f}")
-    print(f"="*40)
-
-    # Création du Graphique (Scatter Plot)
-    plt.figure(figsize=(8, 8))
-
-    # Nuage de points
-    plt.scatter(targets_clean, preds_clean, alpha=0.5, s=15, c='blue', edgecolors='none', label='Prédictions')
-
-    # Ligne idéale (y = x)
-    min_val = min(targets_clean.min(), preds_clean.min())
-    max_val = max(targets_clean.max(), preds_clean.max())
-    plt.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='Parfait (y=x)')
-
-    plt.title(f"Prédictions vs Réalité - {category_name}\nR² = {r2:.3f} | MAE = {mae:.0f}€")
-    plt.xlabel("Prix Réel (€)")
-    plt.ylabel("Prix Prédit (€)")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-
-    # Sauvegarde
-    filename = os.path.join(save_dir, f"plot_{category_name.lower()}.png")
-    plt.savefig(filename)
-    print(f"[INFO] Graphique sauvegardé sous : {filename}")
+    plt.figure(figsize=(8,8))
+    plt.scatter(t_clean, p_clean, alpha=0.3, s=5)
+    plt.plot([t_clean.min(), t_clean.max()], [t_clean.min(), t_clean.max()], 'r--')
+    plt.title(f"{cat_name}: R²={r2:.3f}")
+    plt.xlabel("Prix Réel")
+    plt.ylabel("Prix Estimé")
+    plt.savefig(os.path.join(output_dir, f"global_plot_{cat_name}.png"))
     plt.close()
 
 
-# --- 3. MAIN ---
+# ==============================================================================
+# 4. MAIN
+# ==============================================================================
 def main():
-    parser = argparse.ArgumentParser(description="Évaluation Modèle SOTA Immobilier")
-
-    # Arguments
-    parser.add_argument('--train_csv_folder', type=str, default='../output/csv/train', help="Dossier Train (pour calibrer le Scaler)")
-    parser.add_argument('--test_csv_folder', type=str, default='../output/csv/test', help="Dossier Test (données à évaluer)")
-    parser.add_argument('--img_dir', type=str, default='../output/eval', help="Dossier images")
-    parser.add_argument('--model_path', type=str, default='checkpoints_sota/model_ep20.pt', help="Chemin vers le fichier .pth")
-    parser.add_argument('--batch_size', type=int, default=16)
-    parser.add_argument('--workers', type=int, default=max(1, multiprocessing.cpu_count()//2))
-
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--train_csv', default='../output/train')
+    parser.add_argument('--test_csv', default='../output/test')
+    parser.add_argument('--img_dir', default='../output/filtered_images')
+    parser.add_argument('--model_path', default='checkpoints_sota/model_ep20.pt')
+    parser.add_argument('--output_dir', default='../output/evaluation_results2')
+    parser.add_argument('--batch_size', type=int, default=8)
     args = parser.parse_args()
 
-    # 1. Détection du Matériel
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-        print("[INIT] Mode: NVIDIA CUDA Detected")
-    elif torch.backends.mps.is_available():
-        device = torch.device("mps")
-        print("[INIT] Mode: APPLE METAL (MPS) Detected")
-    else:
-        device = torch.device("cpu")
-        print("[INIT] Mode: CPU (Attention à la lenteur)")
+    if torch.cuda.is_available(): device = torch.device("cuda")
+    elif torch.backends.mps.is_available(): device = torch.device("mps")
+    else: device = torch.device("cpu")
 
-    # 2. Préparation du Scaler (Data Leakage Prevention)
-    print("[INIT] Calibration du Scaler sur les données Train...")
-    try:
-        dummy_file = [f for f in os.listdir(args.train_csv_folder) if f.endswith('.csv')][0]
-    except IndexError:
-        print("[ERREUR] Dossier Train vide ou introuvable.")
-        return
+    # Calibration
+    print("[INIT] Calibration...")
+    num_cols, cat_cols, text_cols = get_cols_config()
+    scaler, medians, cat_mappings, cat_dims = prepare_preprocessors(args.train_csv, num_cols, cat_cols)
 
-    num_cols, text_cols = get_cols_config(os.path.join(args.train_csv_folder, dummy_file))
-    global_scaler = prepare_scaler_from_subset(args.train_csv_folder, num_cols)
-    
+    # Tokenizer
     tokenizer = AutoTokenizer.from_pretrained('almanach/camembert-base')
 
-    # 3. Chargement du Dataset de TEST
-    print("[INIT] Chargement du Dataset de TEST...")
-    test_ds = RealEstateDataset(
-        csv_folder=args.test_csv_folder,
-        img_dir=args.img_dir,
-        tokenizer=tokenizer,
-        scaler=global_scaler, # Utilise le scaler calibré sur Train
-        num_cols=num_cols,
-        text_cols=text_cols,
-        is_train=False
-    )
+    # Dataset Test
+    ds = RealEstateDataset(args.test_csv, args.img_dir, tokenizer, scaler, medians, cat_mappings, num_cols, cat_cols)
+    loader = DataLoader(ds, batch_size=args.batch_size, collate_fn=real_estate_collate_fn)
 
-    test_loader = DataLoader(
-        test_ds,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.workers,
-        collate_fn=real_estate_collate_fn,
-        pin_memory=True
-    )
-
-    # 4. Chargement du Modèle SOTA
-    print(f"[INIT] Chargement du modèle depuis : {args.model_path}")
-    
-    # --- MODIFICATION SOTA : Config Catégorielle ---
-    # TODO : Mettre à jour cat_cardinalities comme dans train.py
-    current_cat_cardinalities = [] # Ex: [7] si DPE
-
+    # Modèle
+    print("[INIT] Chargement Modèle...")
     model = SOTARealEstateModel(
-        num_continuous=len(num_cols),
-        cat_cardinalities=current_cat_cardinalities,
-        img_model_name='convnext_large.fb_in1k',
+        len(num_cols), cat_dims, 
+        img_model_name='convnext_large.fb_in1k', 
         text_model_name='almanach/camembert-base',
-        fusion_dim=512,
-        depth=4,
-        freeze_encoders=True # Pas d'impact en eval
+        fusion_dim=512, depth=4, freeze_encoders=True
     ).to(device)
 
-    # Chargement sécurisé des poids
-    checkpoint = torch.load(args.model_path, map_location=device)
-    # Gestion de la structure du checkpoint
-    state_dict = checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint
-    model.load_state_dict(state_dict)
+    if os.path.exists(args.model_path):
+        state_dict = torch.load(args.model_path, map_location=device)
+        model.load_state_dict(state_dict)
+    else:
+        print("ERREUR: Modèle introuvable.")
+        return
 
-    # 5. Exécution
-    (preds_vente, targets_vente), (preds_loc, targets_loc) = run_inference(model, test_loader, device)
+    # Exécution avec noms des features pour l'affichage
+    (pv, tv), (pl, tl) = run_eval_and_explain(model, loader, device, tokenizer, args.output_dir, num_cols)
 
-    # 6. Résultats
-    print_metrics_and_plot(preds_vente, targets_vente, "VENTE")
-    print_metrics_and_plot(preds_loc, targets_loc, "LOCATION")
-    
-    print("\n[FIN] Évaluation terminée.")
+    # Sauvegarde Metrics
+    save_metrics(pv, tv, "VENTE", args.output_dir)
+    save_metrics(pl, tl, "LOCATION", args.output_dir)
+
+    print(f"[FIN] Résultats sauvegardés dans {args.output_dir}")
+
 
 if __name__ == "__main__":
     main()

@@ -1,27 +1,19 @@
-"""
-load_data.py - Chargeur Multi-Task (Vente & Location).
-
-Corrections :
-- dataset_source est utilisé comme Feature d'entrée (0=Vente, 1=Loc).
-- dataset_source est utilisé pour router la Target (remplir log_price OU log_rent).
-"""
-
 import os
 import torch
 import pandas as pd
 import numpy as np
 from PIL import Image
-
 from torch.utils.data import Dataset
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler
 from torchvision import transforms
 
 
 
 # ==============================================================================
-# 1. CONFIGURATION
+# CONFIGURATION
 # ==============================================================================
 
+# On déplace les binaires ici pour qu'elles soient traitées comme des EMBEDDINGS
 BINARY_COLS = [
     'ext_balcony', 'ext_garden', 'ext_pool', 'ext_terrace', 
     'feat_american_kitchen', 'feat_attic', 'feat_basement', 'feat_caretaker', 'feat_cellar',
@@ -32,74 +24,80 @@ BINARY_COLS = [
 
 
 def get_cols_config():
-    # 1. Texte
     text_cols = ['titre', 'description']
 
-    # 2. Catégories
-    cat_cols = ['property_type', 'orientation']
+    # Ajout des binaires aux catégories + dataset_source
+    base_cat = ['property_type', 'orientation', 'dataset_source']
+    cat_cols = base_cat + BINARY_COLS
 
-    # 3. Continus
-    base_cont = [
+    # Uniquement les vrais chiffres continus ici
+    cont_cols = [
         'latitude', 'longitude', 
         'living_area_sqm', 'total_land_area_sqm', 
         'num_rooms', 'num_bedrooms', 'num_bathrooms', 'num_parking_spaces',
-        'year_built',
-        'energy_rating', 
-        'property_status',
-        'dataset_source' # <--- Le modèle doit savoir le type de transaction
+        'year_built', 'energy_rating'
     ]
-
-    cont_cols = base_cont + BINARY_COLS
+    
     return cont_cols, cat_cols, text_cols
 
 
 # ==============================================================================
-# 2. CALIBRATION
+# CALIBRATION
 # ==============================================================================
 def prepare_preprocessors(csv_folder, cont_cols, cat_cols):
     print(f"[PREPROC] Calibration sur {csv_folder}...")
-
     df_list = []
     try:
-        files = [os.path.join(csv_folder, f) for f in os.listdir(csv_folder)][:5]
+        files = [os.path.join(csv_folder, f) for f in os.listdir(csv_folder) if f.endswith('.csv')][:6]
     except: return None, None, None, None
 
     for f in files: 
-        try:
-            df = pd.read_csv(f, sep=";", quotechar='"')
-            df_list.append(df)
+        try: df_list.append(pd.read_csv(f, sep=None, engine='python'))
         except: continue
 
     if not df_list: raise ValueError("Aucun CSV valide.")
     full_df = pd.concat(df_list, ignore_index=True)
 
-    # --- SCALER ---
-    # On exclut dataset_source du scaling car c'est déjà 0/1 (binaire pur)
-    # Mais le StandardScaler gère bien les 0/1, donc on peut tout scaler pour simplifier.
+    # 1. Gestion des valeurs manquantes et Log Transform pour les surfaces
+    medians = {}
+    for c in cont_cols:
+        full_df[c] = pd.to_numeric(full_df[c], errors='coerce')
+        med = full_df[c].median()
+        medians[c] = med
+        full_df[c] = full_df[c].fillna(med)
+        
+        # Astuce SOTA : Log-transform sur les surfaces pour écraser les outliers
+        if 'area' in c:
+            full_df[c] = np.log1p(full_df[c])
 
-    medians = full_df[cont_cols].median().to_dict()
-    full_df[cont_cols] = full_df[cont_cols].fillna(medians)
-
-    scaler = StandardScaler()
+    # 2. Scaler Robuste (Gère mieux les outliers que StandardScaler)
+    scaler = RobustScaler()
     scaler.fit(full_df[cont_cols].values)
 
-    # --- MAPPINGS ---
+    # 3. Mappings Catégoriels (Y compris pour les binaires 0/1)
     cat_mappings = {}
     cat_dims = []
+
     for c in cat_cols:
+        # On force en string pour gérer "0.0", "1.0", "True", "False" uniformément
         full_df[c] = full_df[c].astype(str).fillna("MISSING")
+        
+        # Nettoyage spécifique pour les binaires (0.0 -> 0)
+        if c in BINARY_COLS or c == 'dataset_source':
+             full_df[c] = full_df[c].apply(lambda x: str(int(float(x))) if x.replace('.','',1).isdigit() else "0")
+
         uniques = sorted(full_df[c].unique())
         mapping = {val: i for i, val in enumerate(uniques)}
-        mapping["<UNK>"] = len(uniques)
+        mapping["<UNK>"] = len(uniques) # Token inconnu
+        
         cat_mappings[c] = mapping
         cat_dims.append(len(mapping) + 1)
 
     return scaler, medians, cat_mappings, cat_dims
 
 
-
 # ==============================================================================
-# 3. DATASET MULTI-TASK
+# DATASET
 # ==============================================================================
 class RealEstateDataset(Dataset):
     def __init__(self, csv_folder, img_dir, tokenizer, scaler, medians, cat_mappings, cont_cols, cat_cols):
@@ -110,31 +108,26 @@ class RealEstateDataset(Dataset):
         self.cont_cols = cont_cols
         self.cat_mappings = cat_mappings
         self.cat_cols = cat_cols
+        self.binary_cols = BINARY_COLS # Référence globale
 
         self.transform = transforms.Compose([
             transforms.Resize((224, 224)),
             transforms.ToTensor(),
+            # Normalisation ImageNet standard
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
-        # Chargement
         self.data = []
         files = [f for f in os.listdir(csv_folder) if f.endswith('.csv')]
         for f in files:
-            try:
-                self.data.append(pd.read_csv(os.path.join(csv_folder, f), sep=None, engine='python'))
+            try: self.data.append(pd.read_csv(os.path.join(csv_folder, f), sep=None, engine='python'))
             except: pass
-
         self.df = pd.concat(self.data, ignore_index=True)
-
-        # --- GESTION DES TARGETS (VENTE vs LOCATION) ---
-        # Nettoyage prix brut
+        
+        # Nettoyage Prix
         self.df['price'] = pd.to_numeric(self.df['price'], errors='coerce')
         self.df = self.df.dropna(subset=['price'])
-
-        # Nettoyage Source (0 = Vente, 1 = Location, ajustez selon vos données réelles !)
-        # On suppose ici que dans votre CSV : 0 = Vente, 1 = Location.
-        # Si c'est du texte ("buy", "rent"), il faut le convertir avant.
+        # Nettoyage Source (0/1)
         self.df['dataset_source'] = pd.to_numeric(self.df['dataset_source'], errors='coerce').fillna(0).astype(int)
 
 
@@ -143,127 +136,108 @@ class RealEstateDataset(Dataset):
 
 
     def load_images(self, property_id):
-        # ID garanti valide : conversion directe en string pour le chemin
         folder_path = os.path.join(self.img_dir, str(property_id))
-
         images = []
-
-        # On vérifie juste que le dossier existe avant de lister
         if os.path.exists(folder_path):
-            # Pas de filtre d'extension, on prend tout le contenu
-            files = sorted(os.listdir(folder_path))
-
+            files = sorted(os.listdir(folder_path))[:10] # Max 10 images
             for f in files:
                 try:
                     with Image.open(os.path.join(folder_path, f)).convert('RGB') as img:
                         images.append(self.transform(img))
-                except: 
-                    continue
-        else:
-            print(f"Erreur: le dossier d'image: {folder_path} n'existe pas")
-        # Gestion de sécurité si le dossier est vide ou l'ID incorrect malgré la garantie
-        if not images: 
+                except: continue
+        
+        if not images:
+            # Image noire "placeholder" si vide
             images.append(torch.zeros(3, 224, 224))
-
-        return torch.stack(images)
+            return torch.stack(images), False # False = C'est du fake
+        
+        return torch.stack(images), True # True = Vraies images
 
 
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
 
-        # 1. TEXTE
+        # 1. Texte
         text = str(row.get('titre', '')) + " . " + str(row.get('description', ''))
-        tokens = self.tokenizer(text, padding='max_length', truncation=True, max_length=256, return_tensors='pt')
+        tokens = self.tokenizer(text, padding='max_length', truncation=True, max_length=512, return_tensors='pt')
 
-        # 2. CONTINUS
+        # 2. Continus (Log1p + RobustScaler)
         vals = []
         for c in self.cont_cols:
-            val = row.get(c, np.nan)
-            vals.append(val if pd.notna(val) else self.medians.get(c, 0.0))
+            raw_val = pd.to_numeric(row.get(c, np.nan), errors='coerce')
+            if pd.isna(raw_val): raw_val = self.medians.get(c, 0.0)
+
+            # Application Log1p si c'est une surface
+            if 'area' in c: raw_val = np.log1p(max(0, raw_val))
+            vals.append(raw_val)
+
         scaled_cont = self.scaler.transform(np.array(vals).reshape(1, -1)).flatten()
 
-        # 3. CATÉGORIES
+        # 3. Catégories (y compris Binaires)
         cat_idxs = []
         for c in self.cat_cols:
-            val = str(row.get(c, "MISSING"))
-            cat_idxs.append(self.cat_mappings[c].get(val, self.cat_mappings[c]["<UNK>"]))
+            val_raw = str(row.get(c, "MISSING"))
+            # Normalisation string comme dans le prepare_preprocessors
+            if c in self.binary_cols or c == 'dataset_source':
+                try: val_clean = str(int(float(val_raw)))
+                except: val_clean = "0"
+            else:
+                val_clean = val_raw
+                
+            idx_cat = self.cat_mappings[c].get(val_clean, self.cat_mappings[c]["<UNK>"])
+            cat_idxs.append(idx_cat)
 
-        # 4. TARGETS & MASQUES (LOGIQUE MULTI-TASK)
+        # 4. Target
         source = int(row.get('dataset_source', 0))
-        price_val = float(row['price'])
-        log_val = np.log1p(price_val)
+        log_price = np.log1p(float(row['price']))
+        target_vec = torch.zeros(2); mask_vec = torch.zeros(2)
+        
+        if source == 0: target_vec[0] = log_price; mask_vec[0] = 1.0 # Vente
+        else: target_vec[1] = log_price; mask_vec[1] = 1.0 # Loc
 
-        # Initialisation : Tout à zéro
-        target_vec = torch.zeros(2, dtype=torch.float32) # [Log_Vente, Log_Loc]
-        mask_vec = torch.zeros(2, dtype=torch.float32)   # [Mask_Vente, Mask_Loc]
-
-        if source == 0:
-            # C'est une VENTE
-            target_vec[0] = log_val
-            mask_vec[0] = 1.0
-        else:
-            # C'est une LOCATION
-            target_vec[1] = log_val
-            mask_vec[1] = 1.0
-
-        # 5. IMAGES
-        images_tensor = self.load_images(row['id'])
+        # 5. Images
+        imgs_tensor, has_real_imgs = self.load_images(row['id'])
 
         return {
-            'images': images_tensor,
+            'images': imgs_tensor,
+            'has_real_imgs': has_real_imgs, # Pour savoir si le dossier était vide
             'input_ids': tokens['input_ids'].squeeze(0),
             'attention_mask': tokens['attention_mask'].squeeze(0),
             'tab_cont': torch.tensor(scaled_cont, dtype=torch.float32),
-            'tab_cat': torch.tensor(cat_idxs, dtype=torch.long), # Toujours nécessaire pour property_type/orientation
+            'tab_cat': torch.tensor(cat_idxs, dtype=torch.long),
             'targets': target_vec,
             'masks': mask_vec
         }
 
 
-# ==============================================================================
-# 4. COLLATE FN (Gestion des batchs variables)
-# ==============================================================================
 def real_estate_collate_fn(batch):
-    """
-    Gère le padding dynamique des images pour qu'elles aient toutes la même dimension
-    dans un batch donné.
-    """
-    # 1. Trouver le nombre max d'images dans CE batch
     img_lengths = [x['images'].shape[0] for x in batch]
     max_imgs = max(img_lengths)
-
     batch_size = len(batch)
 
-    # 2. Préparer les tenseurs de réception
-    # Shape: (Batch, Max_Images, Channels, H, W)
-    padded_images = torch.zeros(batch_size, max_imgs, 3, 224, 224) 
+    padded_images = torch.zeros(batch_size, max_imgs, 3, 224, 224)
+    # Masque d'attention pour les images (1 = Vraie Image, 0 = Padding)
+    image_attn_mask = torch.zeros(batch_size, max_imgs)
 
-    # Masque pour dire au modèle : 1=Vraie image, 0=Padding
-    # Shape: (Batch, Max_Images)
-    image_masks = torch.zeros(batch_size, max_imgs)
-
-    # 3. Remplissage
     for i, x in enumerate(batch):
-        imgs = x['images'] # Tenseur de forme (N, 3, 224, 224)
-        num_imgs = imgs.shape[0]
-    
-        # On copie les images réelles au début du tenseur vide
-        padded_images[i, :num_imgs] = imgs
-    
-        # On met le masque à 1 pour les vraies images
-        image_masks[i, :num_imgs] = 1.0
+        n = x['images'].shape[0]
+        padded_images[i, :n] = x['images']
 
-    # 4. Stack des autres données
+        # Si le dossier était vide (has_real_imgs=False), on met 0 partout (même l'image noire est ignorée)
+        # Sinon, on met 1 sur les n images présentes
+        if x['has_real_imgs']:
+            image_attn_mask[i, :n] = 1.0
+        else:
+            # Cas rare dossier vide : on laisse tout à 0, le modèle ignorera totalement la vision
+            pass 
+
     return {
-        'images': padded_images,          # (B, N_max, 3, 224, 224)
-        'image_masks': image_masks,       # (B, N_max)
-
+        'images': padded_images,
+        'image_masks': image_attn_mask,
         'input_ids': torch.stack([x['input_ids'] for x in batch]),
         'attention_mask': torch.stack([x['attention_mask'] for x in batch]),
-
         'tab_cont': torch.stack([x['tab_cont'] for x in batch]),
         'tab_cat': torch.stack([x['tab_cat'] for x in batch]),
-
         'targets': torch.stack([x['targets'] for x in batch]),
         'masks': torch.stack([x['masks'] for x in batch])
     }
