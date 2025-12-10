@@ -4,8 +4,10 @@ import matplotlib.pyplot as plt
 from outils import get_variable_types,explode_multilabel_column,charger_fichier,clean_outliers
 import argparse
 import math
+from outils import load_all_regions
 import numpy as np
-
+import seaborn as sns
+import os
 # appliquer des derniers filtres  plus tard (viager, type Appartement, et explique pourquoi on a besoin de les enlever) => crée des anomalies statistiques meme en retirant les outliers trop important
 # trouver un moyen sympa d'analyser les colonnes geographiques (lat,long), une plus-value à region,ville
 
@@ -93,26 +95,37 @@ def check_data_quality(df):
     print("\n================")
 
 
+def showBoxPlots(df, low=0.01, high=0.99):
+    os.makedirs("plots", exist_ok=True)
+    num_cols = get_variable_types(df)[0]
 
-def showBoxPlots(df,low=0.01,high=0.99):
-    num_cols= get_variable_types(df)[0]
-    # Creation des box plots pour chaque variable numérique
+    # Nettoyage des outliers
+    df_clean = clean_outliers(df, num_cols, low, high)
 
-    df_clean = clean_outliers(df, num_cols,low, high)
     for col in num_cols:
-        #print(df[col])
         plt.figure(figsize=(6, 4))
-        plt.boxplot(df_clean[col].dropna())
-        plt.title(f"Boxplot de {col}")
+
+        sns.violinplot(
+            data=df_clean,
+            y=col,                  # variable numérique en Y
+            x=None,                 # pas de variable catégorielle
+            inner="box",
+            cut=0,
+            density_norm="width"
+        )
+
+        plt.title(f"Violin plot de {col}")
         plt.ylabel(col)
-        plt.grid(True)
-        plt.show()
-        plt.close()
+        plt.grid(True, axis="y", linestyle="--", alpha=0.5)
+        plt.tight_layout()
+        plt.savefig(f"plots/univ_violin_{col}.png")
+    
+    plt.close()
 
 
 #montre les histogrammes des varaibles numériques
 def showHistoPlots(df,low=0.01,high=0.99):
-
+    os.makedirs("plots", exist_ok=True)
     num_cols= get_variable_types(df)[0]
     df_clean = clean_outliers(df, num_cols,low, high)
 
@@ -124,11 +137,13 @@ def showHistoPlots(df,low=0.01,high=0.99):
         plt.xlabel(col)
         plt.ylabel("Fréquence")
         plt.grid(True)
-        plt.show()
+        plt.savefig(f"plots/univ_hist_{col}.png")
         plt.close()
 
 def showCatPlots(df, max_categories=20): # je limite le nombre de categorie pour une variable car si y'en a trop c'est plus representable par un plot 
+    os.makedirs("plots", exist_ok=True)
     # Variables catégorielles
+
     cat_cols = get_variable_types(df)[1]
 
     # Colonnes à ignorer (trop de modalités)
@@ -161,9 +176,11 @@ def showCatPlots(df, max_categories=20): # je limite le nombre de categorie pour
         plt.xticks(rotation=45, ha="right")
 
         plt.tight_layout()
-        plt.show()
+        plt.savefig(f"plots/univ_cat_{col}.png")
+        plt.close()
 
 def plot_multilabel_counts(df, col, sep, top=20):
+    os.makedirs("plots", exist_ok=True)
     d = explode_multilabel_column(df, col, sep)
     counts = d.sum().sort_values(ascending=False).head(top)
 
@@ -173,7 +190,8 @@ def plot_multilabel_counts(df, col, sep, top=20):
     plt.xlabel("Nombre d'annonces")
     plt.gca().invert_yaxis()
     plt.tight_layout()
-    plt.show()
+    plt.savefig(f"plots/univ_multilabel_{col}.png")
+    plt.close()
 
 
 
@@ -185,7 +203,6 @@ def main():
     parser.add_argument(
         "-f", "--file",
         type=str,
-        required=True,
         help="Chemin vers le fichier CSV à analyser."
     )
     parser.add_argument(
@@ -195,8 +212,15 @@ def main():
         help="Nombre de processus à utiliser (optionnel)."
     )
 
+    parser.add_argument(
+        "-p", "--path", 
+        type=str, 
+        required=True,
+        help="Dossier contenant plusieurs fichiers CSV régionaux"
+    )
+
     args = parser.parse_args()  
-    df = charger_fichier(args.file)
+    df = load_all_regions(args.path)
     detect_outliers_iqr(df)
     stats_univariees(df)
     

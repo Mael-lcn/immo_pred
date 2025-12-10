@@ -10,11 +10,12 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.metrics import silhouette_score,mean_absolute_error, root_mean_squared_error, r2_score
 from sklearn.cluster import KMeans 
-
+import os
 from outils import get_variable_types, charger_fichier
 
 
-def plot_correlation_circle(pca, components, feature_names):
+def plot_correlation_circle(pca, components, feature_names,axe_x=0, axe_y=1):
+    os.makedirs("plots", exist_ok=True)
 
     plt.figure(figsize=(8, 8))
     
@@ -40,7 +41,8 @@ def plot_correlation_circle(pca, components, feature_names):
     plt.xlim(-1.1, 1.1)
     plt.ylim(-1.1, 1.1)
     plt.tight_layout()
-    plt.show()
+    plt.savefig(f"plots/_pca_correlation_circle_axes_{axe_x}_{axe_y}.png")
+    plt.close()
 
 
 
@@ -72,10 +74,10 @@ def run_pca(df):
     pca = PCA()
     X_pca = pca.fit_transform(X_scaled)
 
-    plot_correlation_circle(pca, pca.components_[0:2], df_num.columns) # Axes 1 vs 2
-    plot_correlation_circle(pca, pca.components_[[0, 2]], df_num.columns) # Axes 1 vs 3
-    plot_correlation_circle(pca, pca.components_[1:3], df_num.columns) # Axes 2 vs 3
-    plot_correlation_circle(pca, pca.components_[[0, 3]], df_num.columns) # Axes 1 4
+    plot_correlation_circle(pca, pca.components_[0:2], df_num.columns,1,2) # Axes 1 vs 2
+    plot_correlation_circle(pca, pca.components_[[0, 2]], df_num.columns,1,3) # Axes 1 vs 3
+    plot_correlation_circle(pca, pca.components_[1:3], df_num.columns,2,3) # Axes 2 vs 3
+    plot_correlation_circle(pca, pca.components_[[0, 3]], df_num.columns,1,4) # Axes 1 4
     # pas besoin d'observer les autres axes
 
     # Variance expliquée
@@ -92,8 +94,8 @@ def run_pca(df):
     plt.ylabel("Variance expliquée")
     plt.grid(True)
     plt.tight_layout()
-    plt.show()
-
+    plt.savefig("plots/_pca_scree_plot.png")
+    plt.close()
 
 def k_means(df):
     k=4
@@ -124,6 +126,7 @@ def k_means(df):
 
 
 def find_number_clusters(df):
+    os.makedirs("plots", exist_ok=True)
     num_cols = get_variable_types(df)[0]
         # 2) Données (et plus les noms de colonnes !)
     X = df[num_cols].dropna()
@@ -148,7 +151,7 @@ def find_number_clusters(df):
     plt.title("Méthode du coude")
     plt.grid(True)
     plt.tight_layout()
-    plt.show()
+    plt.savefig("plots/_kmeans_elbow_method.png")
 
     # 5) Scores silhouette
     print("Scores silhouette :")

@@ -2,10 +2,12 @@
 import pandas as pd
 import seaborn as sns
 import argparse
+import os
 import matplotlib.pyplot as plt
 from outils import get_variable_types,clean_outliers,charger_fichier,explode_multilabel_column
 from analyse_bivariee_numTonum import showMat_Corr,showScatters_Plots
 from analyse_bivariee_cat import boxplot_prix_par_categorie
+from outils import load_all_regions
 
 
 #--------------------
@@ -21,8 +23,6 @@ def analyse_numerique_numerique(df):
 
     # scatters plots
     showScatters_Plots(df)
-
-
 
 
 
@@ -43,6 +43,7 @@ def analyse_num_cat(df):
         "department",
         "energy_rating",
         "orientation",
+        "region"
         #"anciennete_bien",
     ]
     for col in cat_candidates:
@@ -62,6 +63,7 @@ def analyse_multilabel_vs_prix(df, col, sep, top=15):
     Pour une colonne multilabel (ex: 'specificites'),
     calcule et affiche le prix moyen par étiquette.
     """
+    os.makedirs("plots", exist_ok=True)
     if col not in df.columns or "price" not in df.columns:
         print(f"Colonne {col} ou 'price' absente du DataFrame.")
         return
@@ -93,8 +95,8 @@ def analyse_multilabel_vs_prix(df, col, sep, top=15):
     plt.xlabel("Prix moyen")
     plt.title(f"Prix moyen en fonction de {col} (Top {top})")
     plt.tight_layout()
-    plt.show()
-
+    plt.savefig(f"plots/_bivariee_multilabel_price_{col}.png")
+    plt.close()
 
 def analyse_multilabels(df):
     """
@@ -102,9 +104,9 @@ def analyse_multilabels(df):
     """
     print("\n=== Analyse des variables multilabels vs prix ===")
 
-    if "outside" in df.columns:
+    if "exterior_access" in df.columns:
         print("\nEffet des types d'accès extérieur sur le prix (acces_exterieur)")
-        analyse_multilabel_vs_prix(df, "outside", sep=",")
+        analyse_multilabel_vs_prix(df, "exterior_access", sep=",")
 
     if "special_features" in df.columns:
         print("\nEffet des spécificités sur le prix ")
@@ -113,11 +115,9 @@ def analyse_multilabels(df):
 
 
 
-# ======================================
-# PARTIE 4 : Analyse géographique
-# ======================================
-
 def analyse_geo(df):
+    os.makedirs("plots", exist_ok=True)
+
     """
     Analyse simple des relations géographiques :
     - Scatter latitude/longitude coloré par prix
@@ -138,7 +138,8 @@ def analyse_geo(df):
         )
         plt.title("Localisation des biens (couleur = prix)")
         plt.tight_layout()
-        plt.show()
+        plt.savefig("plots/_bivariee_geo_scatter_price.png")
+        plt.close()
 
     if "department" in df.columns and "price" in df.columns:
         prix_dep = df.groupby("department")["price"].mean().sort_values(ascending=False)
@@ -148,7 +149,8 @@ def analyse_geo(df):
         plt.ylabel("Prix moyen")
         plt.xticks(rotation=45, ha="right")
         plt.tight_layout()
-        plt.show()
+        plt.savefig("plots/_bivariee_geo_price_department.png")
+        plt.close()
 
 
 
@@ -161,7 +163,6 @@ def main():
     parser.add_argument(
         "-f", "--file",
         type=str,
-        required=True,
         help="Chemin vers le fichier CSV à analyser."
     )
     parser.add_argument(
@@ -171,10 +172,18 @@ def main():
         help="Nombre de processus à utiliser (optionnel)."
     )
 
+    parser.add_argument(
+        "-p", "--path", 
+        type=str, 
+        required=True,
+        help="Dossier contenant plusieurs fichiers CSV régionaux"
+    )
+
     args = parser.parse_args()  
-    df = charger_fichier(args.file)
-    #analyse_numerique_numerique(df)
-    analyse_num_cat(df)
+    df = load_all_regions(args.path)
+    #df= charger_fichier(args.file)
+    analyse_numerique_numerique(df)
+    #analyse_num_cat(df)
     #analyse_multilabels(df)
     #analyse_geo(df)
 

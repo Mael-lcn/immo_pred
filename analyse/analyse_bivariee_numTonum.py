@@ -3,9 +3,10 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 from outils import get_variable_types,clean_outliers
-
+import os 
 # m atrice de corrélation 
 def showMat_Corr(df,low=0.01, high=0.99):
+    os.makedirs("plots", exist_ok=True)
     #petit retour: le prix est mal corrélé à la surface habitable même après avoir clean les outliers (bizarre)
     # On a vu dans l'analyse univariee que d'autres types de biens que Maison/appartemnt étaient présent, ça doit jouer 
 
@@ -37,9 +38,11 @@ def showMat_Corr(df,low=0.01, high=0.99):
     )
     plt.title("Matrice de corrélation")
     plt.tight_layout()
-    plt.show()
+    plt.savefig(f"plots/univ_cat_correlation_matrix.png")
+    plt.close()
 
 def showScatters_Plots(df):
+    os.makedirs("plots", exist_ok=True)
     variables_scatters = [
         "living_area_sqm",
         "total_land_area_sqm",
@@ -97,4 +100,5 @@ def show_scatter_raw_vs_clean(df, x, y="price", low=0.01, high=0.99):
 
     fig.suptitle(f"{y} en fonction de {x} : brut vs clean", y=1.02)
     plt.tight_layout()
-    plt.show()
+    plt.savefig(f"plots/scatter_{x}_vs_{y}.png")
+    plt.close()

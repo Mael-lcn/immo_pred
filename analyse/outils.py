@@ -107,14 +107,15 @@ def load_all_regions(folder_path):
     df_list = []
     for file in csv_files:
         try:
-            # ⬇️ Utilise la même logique que quand tu charges un seul fichier
             df_temp = charger_fichier(file)
-            region_name = os.path.basename(file).replace(".csv", "")
-            df_temp["region"] = region_name
+
+            # ❌ IMPORTANT : ne PAS écraser la colonne "region"
+            # ❌ Ne plus faire : df_temp["region"] = os.path.basename(file)
+
             df_list.append(df_temp)
+
         except Exception as e:
             print(f"⚠️ Erreur lors de la lecture de {file} : {e}")
-            # si tu veux ignorer les fichiers cassés, continue
             continue
 
     df = pd.concat(df_list, ignore_index=True)

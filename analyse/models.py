@@ -78,55 +78,36 @@ def regression_lineaire(df):
 
 
 
-
 def random_forest_regression(df):
+    cols_to_remove = ["id", "dataset_source", "postal_code", "estimated_notary_fees"]
+    df = df.drop(columns=cols_to_remove, errors="ignore")
 
-    # On garde seulement les lignes avec un prix (toutes lignes normlament vu que le filtre du fan du collabo est très bien)
-
-
-    #bon là c'est juste les lignes d'init
-    cols_to_remove = ["id", "dataset_source", "postal_code"]  # postal_code optionnel
-    df = df.drop(columns=cols_to_remove)
     df_valid = df[df["price"].notna()].copy()
-
     y = df_valid["price"]
 
-    # 1) On récupère explicitement les colonnes numériques
-    X_num = df_valid.select_dtypes(include="number").drop(columns=["price"])
+    # Si le OHE est déjà fait, toutes les colonnes utiles sont numériques
+    X = df_valid.drop(columns=["price"])
 
-
-    # 2) On ajoute explicitement les dummies région + type si elles existent
-    dummy_cols = [c for c in df_valid.columns if c.startswith("region_") or c.startswith("type_")]
-
-    # Certaines dummies peuvent déjà être dans X_num (si dtype = number), donc on évite les doublons
-    dummy_cols = [c for c in dummy_cols if c not in X_num.columns]
-
-    # 3) On concatène
-    if dummy_cols:
-        X = pd.concat([X_num, df_valid[dummy_cols]], axis=1)
-    else:
-        X = X_num
+    # On garde seulement les numériques (au cas où il reste des colonnes non num)
+    X = X.select_dtypes(include="number")
 
     print("Nombre de features utilisées par le RF :", X.shape[1])
     print("Exemples de colonnes :", list(X.columns)[:20])
 
-    # j'ai va vérifié qu'il y a escolonne snumeriques à Nan, mais au cas où je mets le median, c'est le plus recommandé apparement
     imputer = SimpleImputer(strategy="median")
     X_imp = imputer.fit_transform(X)
 
-
-#ULTRA IMPORTANT fan de petain, ça sert à séparer les tests de l'entrainement, le 0.2 c'est la part des données dédiés au test, (==> 80% des données sont à l'entrainent)
-# J'avais essayé quelques qutres valeurs, et je trouve ça pas mal, j'avais peurd e l'overfitting au debu, mais apparmeent 80/20 c'est un bon ratio
     X_train, X_test, y_train, y_test = train_test_split(
         X_imp, y, test_size=0.2, random_state=42
-    ) 
+    )
 
     model = RandomForestRegressor(
-        n_estimators=300, #le nombre d'arbre dce la foret, + on rajoute + c'est "censé" devenir précis mais lourd en temps d'estimation
-        max_depth=20,  # la prfodeur de l'arbre 
+        n_estimators=300,
+        max_depth=20,
         random_state=42,
-        n_jobs=-1 # comme les workers du fan du collabo mdrr, sert à déterminer le nombre de coeur utilisé pur l'entraineemnt
+        n_jobs=-1
     )
+
     model.fit(X_train, y_train)
 
     y_pred = model.predict(X_test)
@@ -149,12 +130,12 @@ def random_forest_regression(df):
 
 
 
-
+"""
 def xgboost_regression(df):
     print("\n=== XGBoost - Préparation des données ===")
 
     # Colonnes à supprimer si présentes
-    cols_to_remove = ["id", "dataset_source", "cluster", "postal_code"]
+    cols_to_remove = ["id", "dataset_source", "postal_code","estimated_notary_fees"]
     df = df.drop(columns=cols_to_remove, errors="ignore")
 
     # On garde seulement les lignes où le prix existe
@@ -162,6 +143,12 @@ def xgboost_regression(df):
 
     y = df_valid["price"]
     X = df_valid.select_dtypes(include="number").drop(columns=["price"])
+    print("\nColonnes num XGBoost :")
+    print(list(X.columns))
+
+    print("\nColonnes region_* présentes dans df_valid :")
+    print([c for c in df_valid.columns if c.startswith("region_")])
+
 
     print("Nombre de features utilisées par XGBoost :", X.shape[1])
 
@@ -214,6 +201,149 @@ def xgboost_regression(df):
 
     return model, importances
 
+"""
+
+
+"""
+
+2eme version 
+
+def xgboost_regression(df):
+    print("\n=== XGBoost - Préparation des données ===")
+
+    # Colonnes à supprimer si présentes
+    cols_to_remove = ["id", "dataset_source", "postal_code", "estimated_notary_fees"]
+    df = df.drop(columns=cols_to_remove, errors="ignore")
+
+    # On garde seulement les lignes où le prix existe
+    df_valid = df[df["price"].notna()].copy()
+
+    y = df_valid["price"]
+
+    # 1) Numériques de base
+    X_num = df_valid.select_dtypes(include="number").drop(columns=["price"])
+
+    # 2) Dummies région + type comme dans RF
+    dummy_cols = [c for c in df_valid.columns if c.startswith("region_") or c.startswith("type_")]
+    dummy_cols = [c for c in dummy_cols if c not in X_num.columns]
+
+    if dummy_cols:
+        # on force en int8 au cas où ce sont des bool
+        X = pd.concat(
+            [X_num, df_valid[dummy_cols].astype("int8")],
+            axis=1
+        )
+    else:
+        X = X_num
+
+    print("\nColonnes XGBoost :")
+    print(list(X.columns))
+
+    print("Nombre de features utilisées par XGBoost :", X.shape[1])
+
+    # Imputation
+    imputer = SimpleImputer(strategy="median")
+    X_imp = imputer.fit_transform(X)
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_imp, y, test_size=0.2, random_state=42
+    )
+
+    print("\n=== Entraînement du modèle XGBoost ===")
+
+    model = xgb.XGBRegressor(
+        n_estimators=800,
+        learning_rate=0.05,
+        max_depth=8,
+        subsample=0.9,
+        colsample_bytree=0.8,
+        reg_alpha=0.0,
+        reg_lambda=1.0,
+        random_state=42,
+        n_jobs=-1,
+        tree_method="hist"
+    )
+
+    model.fit(X_train, y_train)
+
+    y_pred = model.predict(X_test)
+
+    print("\n=== XGBoost - Performances ===")
+    print(f"MAE : {mean_absolute_error(y_test, y_pred):.2f}")
+    print(f"RMSE : {root_mean_squared_error(y_test, y_pred):.2f}")
+    print(f"R2 : {r2_score(y_test, y_pred):.3f}")
+
+    importances = pd.DataFrame({
+        "feature": X.columns,
+        "importance": model.feature_importances_
+    }).sort_values(by="importance", ascending=False)
+
+    print("\n=== Importance des variables (XGBoost) ===")
+    print(importances.head(25))
+
+    return model, importances
+
+
+"""
+
+
+def xgboost_regression(df):
+    print("\n=== XGBoost - Préparation des données ===")
+
+    cols_to_remove = ["id", "dataset_source", "postal_code", "estimated_notary_fees"]
+    df = df.drop(columns=cols_to_remove, errors="ignore")
+
+    df_valid = df[df["price"].notna()].copy()
+    y = df_valid["price"]
+
+    # On enlève juste la target
+    X = df_valid.drop(columns=["price"])
+    X = X.select_dtypes(include="number")
+
+    print("\nColonnes XGBoost :")
+    print(list(X.columns))
+    print("Nombre de features utilisées par XGBoost :", X.shape[1])
+
+    imputer = SimpleImputer(strategy="median")
+    X_imp = imputer.fit_transform(X)
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_imp, y, test_size=0.2, random_state=42
+    )
+
+    print("\n=== Entraînement du modèle XGBoost ===")
+
+    model = xgb.XGBRegressor(
+        n_estimators=800,
+        learning_rate=0.05,
+        max_depth=8,
+        subsample=0.9,
+        colsample_bytree=0.8,
+        reg_alpha=0.0,
+        reg_lambda=1.0,
+        random_state=42,
+        n_jobs=-1,
+        tree_method="hist"
+    )
+    model.fit(X_train, y_train)
+
+    y_pred = model.predict(X_test)
+
+    print("\n=== XGBoost - Performances ===")
+    print(f"MAE : {mean_absolute_error(y_test, y_pred):.2f}")
+    print(f"RMSE : {root_mean_squared_error(y_test, y_pred):.2f}")
+    print(f"R2 : {r2_score(y_test, y_pred):.3f}")
+
+    importances = pd.DataFrame({
+        "feature": X.columns,
+        "importance": model.feature_importances_
+    }).sort_values(by="importance", ascending=False)
+
+    print("\n=== Importance des variables (XGBoost) ===")
+    print(importances.head(25))
+
+    return model, importances
+
 
 def main():
     parser = argparse.ArgumentParser(description="Analyse multivariée (PCA incluse).")
@@ -235,13 +365,10 @@ def main():
         "Rénové": 3,
         "Très bon état": 4
     }
-    df["etat_bien_num"] = df["property_status"].map(mapping_etat)
 
 
-    df = pd.get_dummies(df, columns=["region"], drop_first=True)
-    df = pd.get_dummies(df, columns=["property_type"], prefix="type")
 
-    regression_lineaire(df)
+    #regression_lineaire(df)
     random_forest_regression(df)
     xgboost_regression(df)
 
