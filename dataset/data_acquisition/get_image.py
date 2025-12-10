@@ -171,7 +171,7 @@ def parse_pad_color(s):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('-c', '--csv', type=str, default='../../output/csv')
+    parser.add_argument('-c', '--csv', type=str, default='../../output/raw_csv')
     parser.add_argument('-o', '--output', type=str, default='../../../data/images')
     parser.add_argument('-w', '--workers', type=int, default=max(1, multiprocessing.cpu_count()-1))
     parser.add_argument('--size', type=int, default=672, help="taille finale (carre) ex: 672")
@@ -185,3 +185,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

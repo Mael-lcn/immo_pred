@@ -1,3 +1,4 @@
+
 import os
 import argparse
 import pandas as pd
@@ -31,8 +32,12 @@ def split_and_chunk(args):
     
     # 1. Chargement complet
     print("1. Chargement des données...")
-    df_achat = load_csvs_from_folder(args.achat)
-    df_loc = load_csvs_from_folder(args.location)
+
+    achat_path = os.path.join(args.input, "achat")
+    loc_path = os.path.join(args.input, "location")
+
+    df_achat = load_csvs_from_folder(achat_path)
+    df_loc = load_csvs_from_folder(loc_path)
 
     # --- CORRECTION ICI : Marquage Numérique (0 = Achat, 1 = Location) ---
     if not df_achat.empty: 
@@ -158,10 +163,9 @@ def split_and_chunk(args):
 
 def main():
     parser = argparse.ArgumentParser(description="Prépare le dataset Deep Learning (Split Proportionnel).")
-    parser.add_argument('-a', '--achat', type=str, default='../output/csv/achat/')
-    parser.add_argument('-l', '--location', type=str, default='../output/csv/location/')
-    parser.add_argument('-o', '--output', type=str, default='../output/csv')
-    
+    parser.add_argument('-i', '--input', type=str, default='../output/processed_csv')
+    parser.add_argument('-o', '--output', type=str, default='../output')
+
     parser.add_argument('--train_ratio', type=float, default=0.8, help="Ratio Train (ex: 0.8).")
     parser.add_argument('--test_ratio', type=float, default=0.2, help="Ratio Test (ex: 0.1). Le reste ira dans Validation.")
     parser.add_argument('--max_rows', type=int, default=1000, help="Lignes max par CSV.")
@@ -183,3 +187,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
