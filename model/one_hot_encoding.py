@@ -8,6 +8,8 @@ import multiprocessing
 from functools import partial
 import csv
 
+from sklearn.preprocessing import StandardScaler
+
 
 
 # Définition des colonnes OHE à retirer du vocabulaire final des FEATURES
@@ -17,7 +19,7 @@ EXCLUSIONS = {"bathtub", "second_bathroom", "sold_rented"}
 DPE_MAP = {'A': 7, 'B': 6, 'C': 5, 'D': 4, 'E': 3, 'F': 2, 'G': 1}
 ETAT_MAP = {
     'Rénové': 4, 'Très bon état': 3, 'Bon état': 2,
-    'À rafraichir': 1, 'Travaux à prévoir': 1,
+    'À rafraichir': 1, 'Travaux à prévoir': 0,
 }
 PROPERTY_MAP = {'Appartement': 1, 'Maison': 0}
 
@@ -32,7 +34,7 @@ def scan_worker(file_path):
     """
     try:
         # Lecture
-        df = pd.read_csv(file_path, sep=";", usecols=['exterior_access', 'special_features'])
+        df = pd.read_csv(file_path, sep=";", usecols=['exterior_access', 'special_features','region'])
 
         # Préparation/Conversion (Sécurité)
         ext_series = df['exterior_access'].fillna("").astype(str)
@@ -42,21 +44,24 @@ def scan_worker(file_path):
         ext_set = set(ext_series.str.split(',').explode().str.strip().dropna().tolist())
         feat_set = set(feat_series.str.split('|').explode().str.strip().dropna().tolist())
 
+         # === region ===
+        region_set = set(df['region'].dropna().astype(str).tolist())
+
+
         # NETTOYAGE
         ext_set.discard("") 
         feat_set.discard("")
 
-        return (ext_set, feat_set) 
+        return (ext_set, feat_set, region_set)
 
     except Exception as e:
         print(f"[WARN SCAN] Échec sur {file_path}: {e}")
-        return (set(), set())
-
+        return (set(), set(), set())
 
 # =============================================================================
 # WORKER 2 : APPLICATION DU OHE ET SAUVEGARDE (NOUVEAU FICHIER)
 # =============================================================================
-def process_worker(file_path, global_ext_cols, global_feat_cols, input_base_dir, output_base_dir):
+def process_worker(file_path, global_ext_cols, global_feat_cols, global_region_list, input_base_dir, output_base_dir):
     """
     Charge un fichier, applique le OHE, aligne sur les colonnes globales,
     et écrit dans le dossier de sortie en reproduisant l'arborescence.
@@ -68,6 +73,8 @@ def process_worker(file_path, global_ext_cols, global_feat_cols, input_base_dir,
         # 2. Préparation (remplacer les NaN)
         df['exterior_access'] = df['exterior_access'].fillna("")
         df['special_features'] = df['special_features'].fillna("")
+        df['region'] = df['region'].fillna("")
+
 
         df['energy_rating'] = df['energy_rating'].map(DPE_MAP)
         df['property_status'] = df['property_status'].map(ETAT_MAP)
@@ -77,18 +84,30 @@ def process_worker(file_path, global_ext_cols, global_feat_cols, input_base_dir,
         local_dummies_ext = df['exterior_access'].str.get_dummies(sep=',') # Sép. Virgule
         local_dummies_feat = df['special_features'].str.get_dummies(sep='|') # Sép. Pipe
 
+
+           # === REGION OHE LOCAL ===
+        local_dummies_region = pd.get_dummies(df['region'], prefix="region")
+
         # 4. ALIGNEMENT GLOBAL
         aligned_ext = local_dummies_ext.reindex(columns=global_ext_cols, fill_value=0)
         aligned_feat = local_dummies_feat.reindex(columns=global_feat_cols, fill_value=0)
+
+         # Alignement global des régions
+        aligned_region = local_dummies_region.reindex(
+            columns=[f"region_{r}" for r in global_region_list],
+            fill_value=0
+        )
+
 
         # 5. Renommage (Préfixes)
         aligned_ext = aligned_ext.add_prefix('ext_')
         aligned_feat = aligned_feat.add_prefix('feat_')
 
         # 6. Concaténation
-        df_final = pd.concat([df.drop(columns=['exterior_access', 'special_features'], errors='ignore'), 
+        df_final = pd.concat([df.drop(columns=['exterior_access', 'special_features','region'], errors='ignore'), 
                               aligned_ext, 
-                              aligned_feat], axis=1)
+                              aligned_feat,
+                              aligned_region], axis=1)
 
         # 7. GESTION DES CHEMINS (Input -> Output)
         # Calcul du chemin relatif (ex: 'sous_dossier/fichier.csv') par rapport au dossier input racine
@@ -142,15 +161,19 @@ def main():
 
     global_ext_set = set()
     global_feat_set = set()
+    global_region_set = set()
+
 
     with multiprocessing.Pool(args.workers) as pool:
         # Les workers retournent (ext_set, feat_set) pour chaque fichier
         results = list(tqdm(pool.imap_unordered(scan_worker, files), total=len(files), desc="Scan"))
 
         # Consolidation
-        for (ext_set, feat_set) in results:
+        for (ext_set, feat_set,region_set) in results:
             global_ext_set.update(ext_set)
             global_feat_set.update(feat_set)
+            global_region_set.update(region_set)
+
 
     # FILTRAGE
     global_feat_set = global_feat_set.difference(EXCLUSIONS)
@@ -158,11 +181,15 @@ def main():
     # Conversion et tri
     global_ext_list = sorted(list(global_ext_set))
     global_feat_list = sorted(list(global_feat_set))
+    global_region_list = sorted(list(global_region_set))
+
 
     print(f"Colonnes 'EXTERIOR' : {len(global_ext_list)} éléments")
     print(f"> : {list(global_ext_list)} éléments\n")
     print(f"Colonnes 'FEATURES' : {len(global_feat_list)} éléments")
     print(f">' : {list(global_feat_list)} éléments")
+    print(f"Colonnes 'REGIONS'  : {len(global_region_list)} → {global_region_list}\n")
+
 
     # ---------------------------------------------------------
     # ÉTAPE 2 : ÉCRITURE
@@ -173,7 +200,8 @@ def main():
     process_func = partial(
         process_worker, 
         global_ext_cols=global_ext_list, 
-        global_feat_cols=global_feat_list, 
+        global_feat_cols=global_feat_list,
+        global_region_list=global_region_list, 
         input_base_dir=args.input,
         output_base_dir=args.output
     )

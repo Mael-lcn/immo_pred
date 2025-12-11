@@ -3,9 +3,10 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 from outils import get_variable_types,clean_outliers
-
+import os 
 # m atrice de corrélation 
 def showMat_Corr(df,low=0.01, high=0.99):
+    os.makedirs("plots", exist_ok=True)
     #petit retour: le prix est mal corrélé à la surface habitable même après avoir clean les outliers (bizarre)
     # On a vu dans l'analyse univariee que d'autres types de biens que Maison/appartemnt étaient présent, ça doit jouer 
 
@@ -37,10 +38,33 @@ def showMat_Corr(df,low=0.01, high=0.99):
     )
     plt.title("Matrice de corrélation")
     plt.tight_layout()
-    plt.show()
+    plt.savefig(f"plots/univ_cat_correlation_matrix.png")
+    plt.close()
+
+def showScatters_Plots(df):
+    os.makedirs("plots", exist_ok=True)
+    variables_scatters = [
+        "living_area_sqm",
+        "total_land_area_sqm",
+        "num_rooms",
+        "num_bedrooms",
+        "num_bathrooms",
+        "num_parking_spaces",
+        "year_built",
+    ]
+    # à modiffier
+    for x in variables_scatters:
+        if x in df.columns and "price" in df.columns:
+            print(f"\nScatter plot prix vs {x} (brut vs clean)")
+            show_scatter_raw_vs_clean(df, x, "price") # prix par defaut, mais on pourra peut etre comparé à autre chose
 
 
-def show_scatter_raw_vs_clean(df, x, y="prix", low=0.01, high=0.99):
+
+
+
+            
+
+def show_scatter_raw_vs_clean(df, x, y="price", low=0.01, high=0.99):
     """
     Affiche deux scatter plots côte à côte :
     - à gauche : données brutes
@@ -76,4 +100,5 @@ def show_scatter_raw_vs_clean(df, x, y="prix", low=0.01, high=0.99):
 
     fig.suptitle(f"{y} en fonction de {x} : brut vs clean", y=1.02)
     plt.tight_layout()
-    plt.show()
+    plt.savefig(f"plots/scatter_{x}_vs_{y}.png")
+    plt.close()
