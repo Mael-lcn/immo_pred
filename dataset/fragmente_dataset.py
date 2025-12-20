@@ -166,8 +166,8 @@ def main():
     parser.add_argument('-i', '--input', type=str, default='../output/processed_csv')
     parser.add_argument('-o', '--output', type=str, default='../output')
 
-    parser.add_argument('--train_ratio', type=float, default=0.8, help="Ratio Train (ex: 0.8).")
-    parser.add_argument('--test_ratio', type=float, default=0.2, help="Ratio Test (ex: 0.1). Le reste ira dans Validation.")
+    parser.add_argument('--train_ratio', type=float, default=0.75, help="Ratio Train (ex: 0.8).")
+    parser.add_argument('--test_ratio', type=float, default=0.01, help="Ratio Test (ex: 0.1). Le reste ira dans Validation.")
     parser.add_argument('--max_rows', type=int, default=1000, help="Lignes max par CSV.")
 
     args = parser.parse_args()

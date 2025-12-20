@@ -1,12 +1,3 @@
-"""
-evaluate_with_attention.py - V3 FINAL : Evaluation SOTA.
-
-Correctifs appliqués :
-- Ordre des arguments aligné sur model.py (fix RuntimeError size mismatch).
-- Chargement robuste des poids (fix _orig_mod).
-- Métriques R2/MAE/MSE.
-"""
-
 import os
 import argparse
 import numpy as np
@@ -19,7 +10,6 @@ from transformers import AutoTokenizer
 from torch.utils.data import DataLoader
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
-# Mode silencieux pour génération serveur
 plt.switch_backend('agg')
 
 # --- IMPORTS LOCAUX ---
@@ -37,7 +27,7 @@ except ImportError as e:
 
 
 # ==============================================================================
-# 1. VISUALISATION COMPLETE
+# 1. VISUALISATION (Inchangée mais utilise les inputs corrigés)
 # ==============================================================================
 def save_full_analysis(images, input_ids, 
                        attn_img, attn_txt, 
@@ -56,6 +46,7 @@ def save_full_analysis(images, input_ids,
     gs_bottom.update(bottom=0.05, top=0.35)  
 
     # A. Images
+    # Normalisation attention pour visu
     if attn_img.max() > 0:
         norm_scores = (attn_img - attn_img.min()) / (attn_img.max() - attn_img.min() + 1e-6)
     else:
@@ -83,6 +74,7 @@ def save_full_analysis(images, input_ids,
     full_text = tokenizer.decode(input_ids, skip_special_tokens=True)
     display_text = (full_text[:400] + '...') if len(full_text) > 400 else full_text
     
+    # Calcul erreur visuelle
     error_pct = abs(pred_price - real_price) / (real_price + 1) * 100
     color_res = 'green' if error_pct < 10 else 'red'
 
@@ -107,7 +99,7 @@ def save_full_analysis(images, input_ids,
     
     top_n = 20
     sns.barplot(x=sorted_names[:top_n], y=sorted_grads[:top_n], ax=ax_feat, palette="viridis", hue=sorted_names[:top_n], legend=False)
-    ax_feat.set_title("IMPORTANCE DES CARACTÉRISTIQUES (Gradients)", fontsize=14, fontweight='bold')
+    ax_feat.set_title("IMPORTANCE DES CARACTÉRISTIQUES (Gradients sur Log-Price)", fontsize=14, fontweight='bold')
     ax_feat.tick_params(axis='x', rotation=45, labelsize=9)
     ax_feat.grid(axis='y', linestyle='--', alpha=0.5)
 
@@ -132,70 +124,85 @@ def run_eval_and_explain(model, dataloader, device, tokenizer, output_dir, featu
     for batch_idx, batch in enumerate(tqdm(dataloader, desc="Evaluation")):
         
         # --- A. Chargement GPU ---
+        # Utilisation des clés du dictionnaire real_estate_collate_fn
         imgs = batch['images'].to(device, non_blocking=True)
-        img_masks = batch['image_masks'].to(device, non_blocking=True) # <--- CRITIQUE: Masque Image
+        img_masks = batch['image_masks'].to(device, non_blocking=True)
+        
         input_ids = batch['input_ids'].to(device, non_blocking=True)
-        mask = batch['attention_mask'].to(device, non_blocking=True)
-        x_cat = batch['tab_cat'].to(device, non_blocking=True)
+        text_mask = batch['text_mask'].to(device, non_blocking=True)
+        
+        x_cat = batch['x_cat'].to(device, non_blocking=True)
+        x_cont = batch['x_cont'].to(device, non_blocking=True).clone().detach()
+        x_cont.requires_grad = True # CRUCIAL pour Feature Importance
         
         targets = batch['targets'].to(device, non_blocking=True)
         masks = batch['masks'].to(device, non_blocking=True)
         
-        x_cont = batch['tab_cont'].to(device, non_blocking=True).clone().detach()
-        x_cont.requires_grad = True
-
-        # --- B. Forward ---
+        # --- B. Forward (Avec Attention) ---
+        # On active les gradients uniquement pour l'explicabilité, pas pour update les poids
         with torch.set_grad_enabled(True):
-            # APPEL CORRIGÉ : On passe bien img_masks en 2ème position
-            p_vente, p_loc, attentions = model(
-                imgs, img_masks, input_ids, mask, x_cont, x_cat, return_attn=True
+            p_vente_log, p_loc_log, attentions = model(
+                images=imgs, 
+                image_masks=img_masks, 
+                input_ids=input_ids, 
+                text_mask=text_mask, 
+                x_cont=x_cont, 
+                x_cat=x_cat, 
+                return_attn=True
             )
             
-            # --- C. Feature Importance ---
+            # --- C. Feature Importance (Calcul des gradients sur la sortie) ---
             gradients = None
             if batch_idx < max_visu_batches:
-                score_to_explain = (p_vente * masks[:, 0].unsqueeze(1)).sum() + (p_loc * masks[:, 1].unsqueeze(1)).sum()
+                # On choisit la sortie pertinente selon si c'est Vente ou Loc
+                score_to_explain = (p_vente_log * masks[:, 0].unsqueeze(1)).sum() + (p_loc_log * masks[:, 1].unsqueeze(1)).sum()
                 score_to_explain.backward(retain_graph=True)
                 gradients = x_cont.grad.abs().cpu().numpy()
-                model.zero_grad()
+                model.zero_grad() # Reset des gradients stockés
 
         # --- D. Visualisation ---
         if batch_idx < max_visu_batches and gradients is not None:
             with torch.no_grad(): 
+                # On prend la dernière couche d'attention
                 last_attn = attentions[-1] 
+                # Moyenne sur les têtes d'attention (B, Heads, Q, K) -> (B, Q, K)
                 if last_attn.dim() == 4: last_attn = last_attn.mean(dim=1)
 
-                p_v_np = p_vente.detach().cpu().numpy().flatten()
-                p_l_np = p_loc.detach().cpu().numpy().flatten()
-                # Targets LOGS -> EUROS
-                t_v_np = torch.exp(targets[:, 0]).detach().cpu().numpy().flatten()
-                t_l_np = torch.exp(targets[:, 1]).detach().cpu().numpy().flatten()
+                # Conversion Log -> Exp pour l'affichage humain
+                p_v_euro = torch.exp(p_vente_log).detach().cpu().numpy().flatten()
+                p_l_euro = torch.exp(p_loc_log).detach().cpu().numpy().flatten()
+                
+                t_v_euro = torch.exp(targets[:, 0]).detach().cpu().numpy().flatten()
+                t_l_euro = torch.exp(targets[:, 1]).detach().cpu().numpy().flatten()
 
                 for i in range(imgs.shape[0]):
                     is_vente = masks[i, 0] > 0
                     is_loc = masks[i, 1] > 0
                     if not (is_vente or is_loc): continue
 
+                    # Attention du Token CLS (Tabulaire) vers Image/Textes
                     cls_attn = last_attn[i, -1, :] 
-                    attn_imgs = cls_attn[:-1]
-                    attn_txt = cls_attn[-1]
+                    attn_imgs = cls_attn[:-1] # Les N premiers sont les images
+                    attn_txt = cls_attn[-1]   # Le dernier est le texte
                     feat_grads = gradients[i]
 
-                    real_p = t_v_np[i] if is_vente else t_l_np[i]
-                    pred_p = p_v_np[i] if is_vente else p_l_np[i]
+                    real_p = t_v_euro[i] if is_vente else t_l_euro[i]
+                    pred_p = p_v_euro[i] if is_vente else p_l_euro[i]
 
                     save_full_analysis(
                         imgs[i], input_ids[i], attn_imgs, attn_txt, feat_grads, feature_names,
                         pred_p, real_p, batch_idx, i, attn_dir, tokenizer
                     )
 
-        # --- E. Métriques ---
+        # --- E. Stockage Métriques (En Euros) ---
         with torch.no_grad():
             mask_vente = masks[:, 0].cpu().numpy().astype(bool)
             mask_loc = masks[:, 1].cpu().numpy().astype(bool)
             
-            curr_p_vente = p_vente.detach().cpu().numpy().flatten()
-            curr_p_loc = p_loc.detach().cpu().numpy().flatten()
+            # Conversion Log -> Exp immédiate pour les métriques
+            curr_p_vente = torch.exp(p_vente_log).detach().cpu().numpy().flatten()
+            curr_p_loc = torch.exp(p_loc_log).detach().cpu().numpy().flatten()
+            
             curr_t_vente = torch.exp(targets[:, 0]).cpu().numpy().flatten()
             curr_t_loc = torch.exp(targets[:, 1]).cpu().numpy().flatten()
 
@@ -214,6 +221,7 @@ def run_eval_and_explain(model, dataloader, device, tokenizer, output_dir, featu
 # 3. METRIQUES
 # ==============================================================================
 def save_metrics(preds, targets, cat_name, output_dir):
+    # Filtrage sécurité
     mask = np.isfinite(preds) & np.isfinite(targets)
     p_clean = preds[mask]
     t_clean = targets[mask]
@@ -233,6 +241,8 @@ def save_metrics(preds, targets, cat_name, output_dir):
 
     plt.figure(figsize=(10, 10))
     plt.scatter(t_clean, p_clean, alpha=0.4, s=10, c='#1f77b4')
+    
+    # Ligne parfaite x=y
     lims = [np.min([t_clean.min(), p_clean.min()]), np.max([t_clean.max(), p_clean.max()])]
     plt.plot(lims, lims, 'r--', alpha=0.75, zorder=0)
     
@@ -254,57 +264,67 @@ def main():
     parser.add_argument('--train_csv', default='../output/train') 
     parser.add_argument('--test_csv', default='../output/test')
     parser.add_argument('--img_dir', default='../output/filtered_images')
-    # Change le nom du checkpoint ici si besoin
-    parser.add_argument('--model_path', default='checkpoints/model_ep25.pt') 
-    parser.add_argument('--output_dir', default='../output/evaluation_results_v3')
+    parser.add_argument('--model_path', default='checkpoints/model_ep30.pt') 
+    parser.add_argument('--output_dir', default='../output/evaluation_results_final')
     parser.add_argument('--batch_size', type=int, default=8)
     args = parser.parse_args()
+
+    os.makedirs(args.output_dir, exist_ok=True)
 
     if torch.cuda.is_available(): device = torch.device("cuda")
     else: device = torch.device("cpu")
     print(f"[INIT] Device: {device}")
 
-    # 1. Calibration
-    print("[INIT] Calibration Préprocesseurs...")
+    # 1. Calibration (SUR LE TRAIN SET pour être cohérent)
+    print("[INIT] Calibration Préprocesseurs (sur Train)...")
     num_cols, cat_cols, text_cols = get_cols_config()
-    scaler, medians, cat_mappings, cat_dims = prepare_preprocessors(args.train_csv, num_cols, cat_cols)
+    
+    # IMPERATIF: On utilise le train set pour fitter le scaler/modes/mapping
+    scaler, medians, modes, cat_mappings, cat_dims = prepare_preprocessors(args.train_csv, num_cols, cat_cols)
 
     # 2. Tokenizer
     tokenizer = AutoTokenizer.from_pretrained('almanach/camembert-base')
 
-    # 3. Dataset
+    # 3. Dataset (Test)
     print(f"[DATA] Chargement Test Set: {args.test_csv}")
-    ds = RealEstateDataset(args.test_csv, args.img_dir, tokenizer, scaler, medians, cat_mappings, num_cols, cat_cols)
+    ds = RealEstateDataset(
+        df_or_folder=args.test_csv, 
+        img_dir=args.img_dir, 
+        tokenizer=tokenizer, 
+        scaler=scaler, 
+        medians=medians, 
+        modes=modes,          # <--- AJOUT CRUCIAL
+        cat_mappings=cat_mappings, 
+        cont_cols=num_cols, 
+        cat_cols=cat_cols
+    )
     loader = DataLoader(ds, batch_size=args.batch_size, collate_fn=real_estate_collate_fn)
 
     # 4. Modèle
     print(f"[MODEL] Chargement Architecture SOTA (Cont:{len(num_cols)}, Cat:{len(cat_dims)})...")
     model = SOTARealEstateModel(
-        len(num_cols), cat_dims, 
+        num_continuous=len(num_cols), 
+        cat_cardinalities=cat_dims, 
         img_model_name='convnext_large.fb_in1k', 
         text_model_name='almanach/camembert-base',
         fusion_dim=512, depth=4, freeze_encoders=True
     ).to(device)
 
-    # 5. Chargement Poids (ROBUSTE)
+    # 5. Chargement Poids
     if os.path.exists(args.model_path):
         print(f"[MODEL] Chargement des poids depuis {args.model_path}")
         state_dict = torch.load(args.model_path, map_location=device)
         
-        # --- FIX POUR TORCH.COMPILE ---
-        # Nettoyage des clés qui commencent par "_orig_mod."
+        # Nettoyage préfixe torch.compile
         new_state_dict = {}
         for k, v in state_dict.items():
-            if k.startswith("_orig_mod."):
-                name = k[10:] 
-                new_state_dict[name] = v
-            else:
-                new_state_dict[k] = v
+            key = k[10:] if k.startswith("_orig_mod.") else k
+            new_state_dict[key] = v
         
         model.load_state_dict(new_state_dict)
     else:
-        print(f"ERREUR CRITIQUE: Modèle introuvable à {args.model_path}")
-        return
+        print(f"ERREUR: Checkpoint introuvable: {args.model_path}")
+        exit(1)
 
     # 6. Exécution
     (pv, tv), (pl, tl) = run_eval_and_explain(model, loader, device, tokenizer, args.output_dir, num_cols)
@@ -319,4 +339,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

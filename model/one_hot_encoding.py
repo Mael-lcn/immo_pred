@@ -7,15 +7,16 @@ from tqdm import tqdm
 import multiprocessing
 from functools import partial
 import csv
+import numpy as np
 
-from sklearn.preprocessing import StandardScaler
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
 
-
-
-# Définition des colonnes OHE à retirer du vocabulaire final des FEATURES
+# Colonnes à exclure du vocabulaire final (bruit ou redondance)
 EXCLUSIONS = {"bathtub", "second_bathroom", "sold_rented"}
 
-# Mappings Ordinaux
+# Mappings Ordinaux (Les NaN resteront NaN après mapping, c'est voulu)
 DPE_MAP = {'A': 7, 'B': 6, 'C': 5, 'D': 4, 'E': 3, 'F': 2, 'G': 1}
 ETAT_MAP = {
     'Rénové': 4, 'Très bon état': 3, 'Bon état': 2,
@@ -23,198 +24,194 @@ ETAT_MAP = {
 }
 PROPERTY_MAP = {'Appartement': 1, 'Maison': 0}
 
+# Colonnes acceptant les NaN -> On génère un flag "_is_missing"
+NAN_TOLERATED_COLS = [
+    "energy_rating",
+    "year_built",
+    "num_bedrooms",
+    "num_bathrooms",
+    "property_status",
+    "orientation"
+]
 
 # =============================================================================
-# WORKER 1 : SCAN DU VOCABULAIRE (ATOMICITÉ PAR EXPLODE)
+# WORKER 1 : SCAN DU VOCABULAIRE (MODE CONFIANT)
 # =============================================================================
 def scan_worker(file_path):
-    """
-    Lit un fichier et extrait les sets atomiques en utilisant split/explode.
-    Retourne deux sets distincts : (ext_set, feat_set).
-    """
     try:
-        # Lecture
-        df = pd.read_csv(file_path, sep=";", usecols=['exterior_access', 'special_features','region'])
+        # Lecture optimisée : on ne charge que le nécessaire pour le scan
+        df = pd.read_csv(file_path, sep=";", usecols=['exterior_access', 'special_features', 'region'])
 
-        # Préparation/Conversion (Sécurité)
+        # Pas de check, on assume que les colonnes sont là
         ext_series = df['exterior_access'].fillna("").astype(str)
         feat_series = df['special_features'].fillna("").astype(str)
+        region_series = df['region'].dropna().astype(str)
 
-        # EXTRACTION ATOMIQUE
+        # Extraction atomique
         ext_set = set(ext_series.str.split(',').explode().str.strip().dropna().tolist())
         feat_set = set(feat_series.str.split('|').explode().str.strip().dropna().tolist())
+        region_set = set(region_series.tolist())
 
-         # === region ===
-        region_set = set(df['region'].dropna().astype(str).tolist())
-
-
-        # NETTOYAGE
-        ext_set.discard("") 
+        # Nettoyage
+        ext_set.discard("")
         feat_set.discard("")
-
+        
         return (ext_set, feat_set, region_set)
 
     except Exception as e:
-        print(f"[WARN SCAN] Échec sur {file_path}: {e}")
+        print(f"[FATAL SCAN] {file_path}: {e}")
         return (set(), set(), set())
 
+
 # =============================================================================
-# WORKER 2 : APPLICATION DU OHE ET SAUVEGARDE (NOUVEAU FICHIER)
+# WORKER 2 : PROCESSING COMPLET (MODE CONFIANT)
 # =============================================================================
 def process_worker(file_path, global_ext_cols, global_feat_cols, global_region_list, input_base_dir, output_base_dir):
-    """
-    Charge un fichier, applique le OHE, aligne sur les colonnes globales,
-    et écrit dans le dossier de sortie en reproduisant l'arborescence.
-    """
     try:
-        # 1. Lecture complète 
+        # 1. Lecture
         df = pd.read_csv(file_path, sep=";")
 
-        # 2. Préparation (remplacer les NaN)
-        df['exterior_access'] = df['exterior_access'].fillna("")
-        df['special_features'] = df['special_features'].fillna("")
-        df['region'] = df['region'].fillna("")
+        # ---------------------------------------------------------
+        # A. GESTION DES FLAGS (IS_MISSING)
+        # ---------------------------------------------------------
+        # On assume que toutes ces colonnes existent.
+        # On crée le flag AVANT toute modification.
+        for col in NAN_TOLERATED_COLS:
+            # Création du flag binaire (1 si NaN, 0 sinon)
+            df[f'{col}_is_missing'] = df[col].isna().astype(int)
+            
+            # NOTE IMPORTANTE : On ne remplit PAS la colonne originale ici.
+            # On la laisse à NaN pour que le DataLoader puisse calculer
+            # la médiane/mode sur le Train Set uniquement plus tard.
 
-
+        # ---------------------------------------------------------
+        # B. MAPPINGS ORDINAUX & BINAIRES
+        # ---------------------------------------------------------
         df['energy_rating'] = df['energy_rating'].map(DPE_MAP)
         df['property_status'] = df['property_status'].map(ETAT_MAP)
         df['property_type'] = df['property_type'].map(PROPERTY_MAP)
 
-        # 3. One-Hot Encoding LOCAL
-        local_dummies_ext = df['exterior_access'].str.get_dummies(sep=',') # Sép. Virgule
-        local_dummies_feat = df['special_features'].str.get_dummies(sep='|') # Sép. Pipe
+        # ---------------------------------------------------------
+        # C. PRÉPARATION TEXTE POUR OHE
+        # ---------------------------------------------------------
+        # On remplit les NaN par vide juste pour que le split fonctionne
+        df['exterior_access'] = df['exterior_access'].fillna("")
+        df['special_features'] = df['special_features'].fillna("")
+        
+        # Pour la région, on force le type Categorical aligné sur le global direct
+        df['region'] = pd.Categorical(df['region'], categories=global_region_list)
 
-
-           # === REGION OHE LOCAL ===
+        # ---------------------------------------------------------
+        # D. ONE-HOT ENCODING & ALIGNEMENT
+        # ---------------------------------------------------------
+        # Multi-Label (Séparateurs , et |)
+        local_dummies_ext = df['exterior_access'].str.get_dummies(sep=',')
+        local_dummies_feat = df['special_features'].str.get_dummies(sep='|')
+        
+        # Mono-Label (Region)
         local_dummies_region = pd.get_dummies(df['region'], prefix="region")
 
-        # 4. ALIGNEMENT GLOBAL
+        # Alignement strict sur le vocabulaire global
+        # (reindex va créer des colonnes de 0 là où ça manque)
         aligned_ext = local_dummies_ext.reindex(columns=global_ext_cols, fill_value=0)
         aligned_feat = local_dummies_feat.reindex(columns=global_feat_cols, fill_value=0)
+        
+        # Pour les régions, on reconstruit les noms de colonnes attendus
+        expected_region_cols = [f"region_{r}" for r in global_region_list]
+        aligned_region = local_dummies_region.reindex(columns=expected_region_cols, fill_value=0)
 
-         # Alignement global des régions
-        aligned_region = local_dummies_region.reindex(
-            columns=[f"region_{r}" for r in global_region_list],
-            fill_value=0
-        )
-
-
-        # 5. Renommage (Préfixes)
+        # Renommage pour éviter les collisions
         aligned_ext = aligned_ext.add_prefix('ext_')
         aligned_feat = aligned_feat.add_prefix('feat_')
 
-        # 6. Concaténation
-        df_final = pd.concat([df.drop(columns=['exterior_access', 'special_features','region'], errors='ignore'), 
-                              aligned_ext, 
-                              aligned_feat,
-                              aligned_region], axis=1)
+        # ---------------------------------------------------------
+        # E. ASSEMBLAGE & SAUVEGARDE
+        # ---------------------------------------------------------
+        cols_to_drop = ['exterior_access', 'special_features', 'region']
+        
+        df_final = pd.concat([
+            df.drop(columns=cols_to_drop),
+            aligned_ext,
+            aligned_feat,
+            aligned_region
+        ], axis=1)
 
-        # 7. GESTION DES CHEMINS (Input -> Output)
-        # Calcul du chemin relatif (ex: 'sous_dossier/fichier.csv') par rapport au dossier input racine
+        # Calcul chemin de sortie
         rel_path = os.path.relpath(file_path, input_base_dir)
-        # Création du chemin final complet
         target_path = os.path.join(output_base_dir, rel_path)
         
-        # Création du dossier parent s'il n'existe pas
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
-
-        # 8. Écriture
         df_final.to_csv(target_path, sep=";", index=False, quoting=csv.QUOTE_MINIMAL)
 
         return 1
+
     except Exception as e:
-        print(f"[ERROR ECRITURE] Écriture échouée pour {file_path}: {e}")
+        print(f"[ERROR PROCESSING] {file_path}: {e}")
         return 0
 
 
+# =============================================================================
+# MAIN
+# =============================================================================
 def main():
-    parser = argparse.ArgumentParser(description="OHE avec alignement global et écriture dans dossier sortie.")
+    parser = argparse.ArgumentParser(description="OHE Strict & Flags Missing")
     parser.add_argument('-i', '--input', type=str, default='../output/raw_csv')
     parser.add_argument('-o', '--output', type=str, default='../output/processed_csv')
     parser.add_argument('-w', '--workers', type=int, default=max(1, multiprocessing.cpu_count()-1))
-
     args = parser.parse_args()
 
-    t0 = time.time()
-    
-    # Vérification dossier input
     if not os.path.exists(args.input):
-        print(f"Erreur: Le dossier d'entrée {args.input} n'existe pas.")
+        print(f"Input introuvable: {args.input}")
         return
 
-    # Création dossier output racine si besoin
-    if not os.path.exists(args.output):
-        print(f"Création du dossier de sortie : {args.output}")
-        os.makedirs(args.output, exist_ok=True)
-
+    # Recherche récursive
     files = glob.glob(os.path.join(args.input, '**', '*.csv'), recursive=True)
     if not files:
-        print("Aucun fichier trouvé.")
+        print("Aucun CSV trouvé.")
         return
 
-    print(f"Démarrage du traitement de {len(files)} fichiers avec {args.workers} workers.")
+    print(f"Traitement de {len(files)} fichiers...")
 
-    # ---------------------------------------------------------
-    # ÉTAPE 1 : SCAN GLOBAL (CONSOLIDER DEUX SETS SÉPARÉS)
-    # ---------------------------------------------------------
-    print("\n--- Étape 1 : Analyse du vocabulaire global ---")
-
-    global_ext_set = set()
-    global_feat_set = set()
-    global_region_set = set()
-
-
+    # 1. SCAN GLOBAL
+    global_ext, global_feat, global_region = set(), set(), set()
+    
     with multiprocessing.Pool(args.workers) as pool:
-        # Les workers retournent (ext_set, feat_set) pour chaque fichier
-        results = list(tqdm(pool.imap_unordered(scan_worker, files), total=len(files), desc="Scan"))
+        # imap_unordered est plus rapide
+        for ext_s, feat_s, reg_s in tqdm(pool.imap_unordered(scan_worker, files), total=len(files), desc="1/2 Scan Vocabulaire"):
+            global_ext.update(ext_s)
+            global_feat.update(feat_s)
+            global_region.update(reg_s)
 
-        # Consolidation
-        for (ext_set, feat_set,region_set) in results:
-            global_ext_set.update(ext_set)
-            global_feat_set.update(feat_set)
-            global_region_set.update(region_set)
+    # Nettoyage Vocabulaire
+    global_feat = global_feat.difference(EXCLUSIONS)
+    global_region.discard(np.nan)
+    global_region.discard("nan")
+    global_region.discard("")
 
+    # Tri pour garantir l'ordre des colonnes
+    ext_list = sorted(list(global_ext))
+    feat_list = sorted(list(global_feat))
+    region_list = sorted(list(global_region))
 
-    # FILTRAGE
-    global_feat_set = global_feat_set.difference(EXCLUSIONS)
+    print(f"\nVocabulaire Global :")
+    print(f"- Exterior Elements : {len(ext_list)}")
+    print(f"- Special Features  : {len(feat_list)}")
+    print(f"- Regions           : {len(region_list)}")
 
-    # Conversion et tri
-    global_ext_list = sorted(list(global_ext_set))
-    global_feat_list = sorted(list(global_feat_set))
-    global_region_list = sorted(list(global_region_set))
-
-
-    print(f"Colonnes 'EXTERIOR' : {len(global_ext_list)} éléments")
-    print(f"> : {list(global_ext_list)} éléments\n")
-    print(f"Colonnes 'FEATURES' : {len(global_feat_list)} éléments")
-    print(f">' : {list(global_feat_list)} éléments")
-    print(f"Colonnes 'REGIONS'  : {len(global_region_list)} → {global_region_list}\n")
-
-
-    # ---------------------------------------------------------
-    # ÉTAPE 2 : ÉCRITURE
-    # ---------------------------------------------------------
-    print(f"\n--- Étape 2 : Standardisation et Écriture vers {args.output} ---")
-
-    # Préparation de la fonction worker avec les chemins racine
+    # 2. PROCESSING DISTRIBUÉ
     process_func = partial(
-        process_worker, 
-        global_ext_cols=global_ext_list, 
-        global_feat_cols=global_feat_list,
-        global_region_list=global_region_list, 
+        process_worker,
+        global_ext_cols=ext_list,
+        global_feat_cols=feat_list,
+        global_region_list=region_list,
         input_base_dir=args.input,
         output_base_dir=args.output
     )
 
-    success_count = 0
     with multiprocessing.Pool(args.workers) as pool:
-        results = list(tqdm(pool.imap_unordered(process_func, files), total=len(files), desc="Écriture"))
-        success_count = sum(results)
-
-    dt = time.time() - t0
-    print(f"\nTerminé en {dt:.2f}s.")
-    print(f"Fichiers traités avec succès : {success_count}/{len(files)}")
-
+        results = list(tqdm(pool.imap_unordered(process_func, files), total=len(files), desc="2/2 Encoding & Flags"))
+    
+    print(f"\nTerminé. Succès : {sum(results)} / {len(files)}")
 
 if __name__ == '__main__':
     main()

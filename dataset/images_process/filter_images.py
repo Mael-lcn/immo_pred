@@ -1,17 +1,13 @@
 """
 Orchestrateur de Filtrage et Clustering d'Images Immobilières.
 
-1.  **Producteurs (Workers CPU)** : Un pool de processus parallèles charge les images depuis le disque.
-2.  **Consommateur (Main Process GPU)** : Le processus principal récupère les images chargées et
-    applique les modèles d'IA (CLIP, DINOv3) séquentiellement.
-
-Architecture technique :
--   Utilise `multiprocessing.Pool` pour paralléliser les I/O (lecture disque).
--   Utilise le processus principal pour l'inférence GPU (évite la duplication de la VRAM).
--   Gère les problèmes de concurrence entre `fork` et `threads` via `TOKENIZERS_PARALLELISM`.
+Ce script gère le parallélisme pour traiter massivement des annonces immobilières.
+- Lecture I/O sur CPU (Multiprocessing).
+- Inférence IA sur GPU (Processus Principal).
+- Clustering dynamique basé sur la similarité visuelle (SOTA).
 
 Usage :
-    python orchestrator.py --csv-root ./input --images-root ./images --results-root ./output
+    python filter_images.py --csv-root ./input --images-root ./images --results-root ./output
 """
 
 import os
@@ -22,48 +18,43 @@ from multiprocessing import Pool, cpu_count
 from tqdm import tqdm
 import torch
 
-from ai_part import init_models, process_listing_from_bytes
+# Import de la logique IA refondue
+from ai_part import init_models, process_listing_smart_clustering
 
 
 
 # -----------------------------------------------------------------------------
-# WORKER : Tâches CPU (Lecture I/O)
+# WORKER : Tâches CPU (Lecture I/O Optimisée)
 # -----------------------------------------------------------------------------
 def read_listing_images_for_listing(task):
     """
-    Fonction exécutée par les workers du Pool.
-    Lit toutes les images d'un dossier donné et les retourne sous forme binaire.
-
-    Args:
-        task (tuple): Un tuple contenant (listing_id, images_dir_path).
-
-    Returns:
-        tuple: (listing_id, liste_des_images)
-               où liste_des_images est une liste de tuples (chemin_fichier, bytes).
+    Lit les images d'un dossier.
+    Optimisé avec os.scandir pour éviter les appels systèmes lents.
     """
     listing_id, images_dir = task
     imgs = []
 
-    # Vérification rapide de l'existence du dossier
     if not os.path.isdir(images_dir):
         return listing_id, imgs
 
-    # Extensions acceptées
-    exts = {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tiff'}
+    valid_exts = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff'}
 
     try:
-        # Parcours récursif ou simple du dossier
-        for root, _, files in os.walk(images_dir):
-            for f in files:
-                if os.path.splitext(f)[1].lower() in exts:
-                    p = os.path.join(root, f)
-                    try:
-                        # Lecture binaire du fichier
-                        with open(p, "rb") as fh:
-                            b = fh.read()
-                        imgs.append((p, b))
-                    except Exception:
-                        pass
+        # os.scandir est beaucoup plus rapide que os.walk ou glob pour des dossiers plats
+        with os.scandir(images_dir) as entries:
+            for entry in entries:
+                if entry.is_file():
+                    # Check extension rapide (minuscule)
+                    if os.path.splitext(entry.name)[1].lower() in valid_exts:
+                        try:
+                            # Lecture binaire pure (rapide)
+                            with open(entry.path, "rb") as fh:
+                                b = fh.read()
+                            # Filtre basique : fichier vide ou corrompu (trop petit)
+                            if len(b) > 512: 
+                                imgs.append((entry.path, b))
+                        except Exception:
+                            pass
     except Exception:
         pass
 
@@ -74,198 +65,174 @@ def read_listing_images_for_listing(task):
 # ORCHESTRATEUR : Gestion du Pipeline
 # -----------------------------------------------------------------------------
 def process_all(csv_root, images_root, results_root, args):
-    """
-    Fonction principale orchestrant le chargement et le traitement IA.
-    MODIFICATION: Sauvegarde directement dans results_root/listing_id.
-    """
-
-    # 1. Collecte des fichiers CSV
-    csv_files = sorted(list(Path(csv_root, "achat").glob("*.csv")) + 
-                       list(Path(csv_root, "location").glob("*.csv")))
+    
+    # 1. Recherche des CSV (Achat et Location)
+    csv_root_path = Path(csv_root)
+    csv_files = sorted(list(csv_root_path.glob("**/achat/*.csv")) + 
+                       list(csv_root_path.glob("**/location/*.csv")) +
+                       list(csv_root_path.glob("*.csv"))) # Sécurité si à la racine
 
     if not csv_files:
-        print("Avertissement : Aucun fichier CSV trouvé.")
+        print(f"[WARN] Aucun fichier CSV trouvé dans {csv_root}")
         return
 
-    # S'assurer que le dossier racine de sortie existe
+    # Création racine sortie
     root_out = Path(results_root)
     root_out.mkdir(parents=True, exist_ok=True)
 
     # -------------------------------------------------------------------------
-    # Initialisation du Pool AVANT les modèles
+    # 2. CHARGEMENT MODÈLES (Une seule fois, sur le GPU Main Process)
     # -------------------------------------------------------------------------
-    n_workers = args.num_workers
-    print(f"--- [SYSTÈME] Démarrage du Pool I/O avec {n_workers} workers ---")
-    pool = Pool(processes=n_workers)
-
+    print("--- [GPU] Chargement des modèles IA ---")
+    
+    # Initialisation centralisée
     try:
-        # ---------------------------------------------------------------------
-        # ÉTAPE IA : Chargement des modèles sur le Main Process
-        # ---------------------------------------------------------------------
-        print("--- [GPU] Chargement des modèles IA ---")
-        device = args.device
-        if device == "auto":
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-        
-        clip_cfg, model_vis, processor_vis = init_models(
-            device=device,
+        models_context = init_models(
+            device=args.device,
             clip_hf_id=args.clip_hf_model,
             visual_id=args.visual_model
         )
-        print(f"--- [GPU] Modèles chargés sur {device}. ---")
+    except Exception as e:
+        print(f"[FATAL] Impossible d'initialiser les modèles : {e}")
+        return
 
-        check_exts = {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tiff'}
+    print("--- [GPU] Modèles prêts. ---")
 
-        # Boucle sur chaque fichier CSV trouvé
+    # -------------------------------------------------------------------------
+    # 3. DÉMARRAGE DU POOL I/O
+    # -------------------------------------------------------------------------
+    # On limite le nombre de workers I/O. Trop de workers saturent la RAM 
+    # car ils envoient tous des images binaires au processus principal.
+    # 8 est un bon compromis sur une machine moderne.
+    n_workers = min(args.num_workers, 8)
+    print(f"--- [CPU] Démarrage du Pool I/O avec {n_workers} workers ---")
+    
+    pool = Pool(processes=n_workers)
+
+    try:
+        # Boucle sur chaque fichier CSV
         for csv_path in csv_files:
-            csv_base = Path(csv_path).stem 
-            print(f"\n=== Traitement du CSV : {csv_path.name} ===")
+            print(f"\n=== Traitement CSV : {csv_path.name} ===")
 
-            # Lecture du CSV
-            with open(csv_path, newline='', encoding='utf-8') as f:
-                reader = csv.DictReader(f, delimiter=';')
-                rows = list(reader)
+            # Lecture et Préparation des tâches
+            tasks = []
+            listing_meta = {} # Pour garder le lien ID -> Dossier de sortie
 
-            tasks = []          
-            listing_meta = {}   
-            report_rows = []    
+            try:
+                with open(csv_path, 'r', encoding='utf-8') as f:
+                    reader = csv.DictReader(f, delimiter=';')
+                    for row in reader:
+                        lid = row.get('id', '').strip()
+                        if not lid: continue
 
-            # Préparation des tâches
-            for row in rows:
-                listing_id = str(row.get('id', '')).strip()
-                if not listing_id: 
+                        # Dossier source des images
+                        img_dir = Path(images_root) / lid
+                        
+                        # Dossier destination
+                        out_dir = root_out / lid
+                        
+                        # SKIP INTELLIGENT : Si le dossier de sortie existe et n'est pas vide
+                        if out_dir.exists() and any(out_dir.iterdir()):
+                            continue
+
+                        # On n'ajoute la tâche que si on doit la traiter
+                        tasks.append((lid, str(img_dir)))
+                        listing_meta[lid] = {"out_dir": str(out_dir)}
+            except Exception as e:
+                print(f"[ERREUR] Lecture CSV {csv_path}: {e}")
+                continue
+
+            if not tasks:
+                print("   -> Aucune nouvelle annonce à traiter.")
+                continue
+
+            print(f"   -> {len(tasks)} annonces en file d'attente.")
+
+            # Lancement du Pipeline : 
+            # Workers lisent le disque -> Main Process fait l'IA
+            # imap_unordered est plus fluide pour la barre de progression
+            iterator = pool.imap_unordered(read_listing_images_for_listing, tasks, chunksize=4)
+            
+            report_rows = []
+
+            for listing_id, images_bytes in tqdm(iterator, total=len(tasks), desc="Processing"):
+                # Si le worker n'a rien trouvé (dossier vide ou inexistant)
+                if not images_bytes:
                     continue
-
-                images_dir = os.path.join(images_root, listing_id)
                 
-                # --- MODIFICATION ICI ---
-                # On pointe directement vers output/ID au lieu de output/csv/ID
-                result_dir = str(root_out / listing_id)
-                # ------------------------
+                meta = listing_meta.get(listing_id)
+                if not meta: continue
 
                 try:
-                    num_rooms = int(row.get('num_rooms'))
-                except ValueError:
-                    num_rooms = 4
+                    # APPEL DE LA FONCTION IA OPTIMISÉE
+                    summary = process_listing_smart_clustering(
+                        listing_id=listing_id,
+                        images_bytes=images_bytes,
+                        results_dir=meta["out_dir"],
+                        models_context=models_context,
+                        device=args.device,
+                        similarity_threshold=args.similarity_threshold,
+                        min_images=args.min_images,
+                        max_images=args.max_images
+                    )
+                    report_rows.append(summary)
 
-                # Logique de reprise (Skip si déjà fait)
-                already_done = False
-                if os.path.isdir(result_dir):
-                    if any(os.path.splitext(f)[1].lower() in check_exts for f in os.listdir(result_dir)):
-                        already_done = True
+                except Exception as e:
+                    print(f"\n[ERREUR TRAITEMENT] ID {listing_id}: {e}")
 
-                if already_done:
-                    report_rows.append({
-                        "listing_id": listing_id, "total": 0, "kept": 0, "selected": 0, 
-                        "clusters": 0, "selected_paths": "SKIPPED_ALREADY_DONE", "time_s": 0
-                    })
-                    continue
+            # Sauvegarde d'un rapport par CSV pour monitoring
+            if report_rows:
+                report_file = root_out / f"report_{csv_path.stem}.csv"
+                try:
+                    keys = report_rows[0].keys()
+                    with open(report_file, 'w', newline='', encoding='utf-8') as f:
+                        dw = csv.DictWriter(f, fieldnames=keys)
+                        dw.writeheader()
+                        dw.writerows(report_rows)
+                except Exception as e:
+                    print(f"[ERREUR] Ecriture rapport : {e}")
 
-                tasks.append((listing_id, images_dir))
-                listing_meta[listing_id] = {"result_dir": result_dir, "num_rooms": num_rooms}
-
-            print(f"Stats : {len(rows)} total | {len(tasks)} à traiter | {len(report_rows)} ignorés")
-
-            if tasks:
-                it = pool.imap_unordered(read_listing_images_for_listing, tasks, chunksize=1)
-                pbar = tqdm(total=len(tasks), desc=f"Traitement {csv_base}")
-
-                for listing_id, images_bytes in it:
-                    meta = listing_meta.get(listing_id)
-                    if not meta: 
-                        continue
-
-                    try:
-                        summary = process_listing_from_bytes(
-                            listing_id=listing_id,
-                            images_bytes=images_bytes,
-                            results_dir=meta["result_dir"],
-                            clip_cfg=clip_cfg,
-                            model_vis=model_vis,
-                            processor_vis=processor_vis,
-                            device=device,
-                            batch_size=args.batch_size,
-                            num_rooms=meta["num_rooms"],
-                            max_pca_components=args.max_pca_components,
-                            clip_debug=args.clip_debug
-                        )
-                    except Exception as e:
-                        print(f"Erreur critique listing {listing_id}: {e}")
-                        summary = {"listing_id": listing_id, "total": 0, "kept": 0, "selected": 0, "clusters": 0, "selected_paths": []}
-
-                    # Calcul du chemin relatif par rapport à la racine (args.results_root)
-                    rel_selected = []
-                    for p in summary.get("selected_paths", []):
-                        try: 
-                            rel_selected.append(os.path.relpath(p, root_out))
-                        except ValueError: 
-                            rel_selected.append(p)
-
-                    report_rows.append({
-                        "listing_id": listing_id,
-                        "total": summary.get("total", 0),
-                        "kept": summary.get("kept", 0),
-                        "selected": summary.get("selected", 0),
-                        "clusters": summary.get("clusters", 0),
-                        "selected_paths": "|".join(rel_selected),
-                        "time_s": summary.get("time_s", 0.0)
-                    })
-
-                    pbar.update(1)
-
-                pbar.close()
-
-            # Sauvegarde à la racine avec le nom du CSV source pour éviter les collisions
-            report_name = f"report_{csv_base}.csv"
-            report_path = root_out / report_name
-
-            with open(report_path, "w", newline='', encoding='utf-8') as rf:
-                fieldnames = ["listing_id", "total", "kept", "selected", "clusters", "selected_paths", "time_s"]
-                writer = csv.DictWriter(rf, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(report_rows)
-            print(f"Rapport sauvegardé : {report_path}")
-
+    except KeyboardInterrupt:
+        print("\n[STOP] Interruption utilisateur...")
     finally:
-        print("\n--- [SYSTÈME] Fermeture du Pool de workers ---")
+        print("\n--- [SYSTÈME] Fermeture du Pool ---")
         pool.close()
         pool.join()
+        print("=== TRAITEMENT TERMINÉ ===")
 
 
 # -----------------------------------------------------------------------------
-# POINT D'ENTRÉE CLI
+# MAIN
 # -----------------------------------------------------------------------------
-def main():
-    """Configuration des arguments en ligne de commande et lancement."""
-    parser = argparse.ArgumentParser(description="Pipeline de filtrage d'images immo (CPU I/O + GPU AI)")
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Pipeline SOTA de filtrage d'images immo")
     
     # Chemins
-    parser.add_argument('-c','--csv-root', type=str, default='../../output/raw_csv', help="Dossier contenant les CSV (achat/location)")
-    parser.add_argument('-i','--images-root', type=str, default='../../../data/images', help="Dossier source des images")
-    parser.add_argument('-r','--results-root', type=str, default='../../output/filtered_images', help="Dossier de sortie")
-
+    parser.add_argument('--csv-root', type=str, default='../../output/raw_csv')
+    parser.add_argument('--images-root', type=str, default='../../../data/images')
+    parser.add_argument('--results-root', type=str, default='../../output/filtered_images')
+    
     # Modèles
-    parser.add_argument('--visual-model', type=str, default='facebook/dinov3-vits16-pretrain-lvd1689m', help="HuggingFace ID pour DINO")
-    parser.add_argument('--clip-hf-model', type=str, default='openai/clip-vit-base-patch32', help="HuggingFace ID pour CLIP")
+    # DINOv2 Base est le meilleur compromis Vitesse/Performance pour le clustering géométrique
+    parser.add_argument('--visual-model', type=str, default='facebook/dinov2-base') 
+    parser.add_argument('--clip-hf-model', type=str, default='openai/clip-vit-base-patch32')
 
-    # Hyperparamètres
-    parser.add_argument('--batch-size', type=int, default=64, help="Taille du batch pour l'inférence")
-    parser.add_argument('--max-pca-components', type=int, default=16, help="Composantes PCA pour le clustering")
+    # Paramètres de Clustering (SOTA)
+    parser.add_argument('--similarity-threshold', type=float, default=0.25, 
+                        help="Seuil de distance Cosine (0.0-1.0). 0.25 = Très strict (images quasi identiques). 0.40 = Plus large.")
+    parser.add_argument('--min-images', type=int, default=3, help="Minimum d'images à conserver par annonce (si dispo)")
+    parser.add_argument('--max-images', type=int, default=15, help="Maximum d'images à conserver par annonce")
 
-    # Système
-    parser.add_argument('--device', type=str, default='auto', choices=['auto','cpu','cuda'], help="Périphérique de calcul")
-    parser.add_argument('--num-workers', type=int, default=max(cpu_count(), 1), help="Nombre de processus CPU pour la lecture des images")
-    parser.add_argument('--clip-debug', action='store_true', help="Active les logs détaillés pour CLIP")
+    # Hardware
+    parser.add_argument('--device', type=str, default='auto')
+    parser.add_argument('--num-workers', type=int, default=max(cpu_count()-2, 1))
 
     args = parser.parse_args()
 
-    print("=== DÉMARRAGE DE L'ORCHESTRATEUR ===")
-    print(f"Config : Device={args.device} | Workers={args.num_workers} | Batch={args.batch_size}")
+    # Fix pour le multiprocessing PyTorch sous Linux/Windows
+    try:
+        torch.multiprocessing.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass
 
     process_all(args.csv_root, args.images_root, args.results_root, args)
-
-    print("=== TRAITEMENT TERMINÉ ===")
-
-if __name__ == "__main__":
-    main()
-
