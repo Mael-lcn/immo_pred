@@ -84,10 +84,10 @@ def save_global_analysis(all_grads, all_attn_img, all_attn_txt, feature_names, e
         plt.figure(figsize=(10, 6))
         # On clip les erreurs extrêmes pour la lisibilité graphique (-100% à +100%)
         clean_errors = np.clip(errors, -100, 100)
-        
+
         sns.histplot(clean_errors, bins=50, kde=True, color="steelblue")
         plt.axvline(0, color='red', linestyle='--', linewidth=2, label="Estimation Parfaite")
-        
+
         mean_err = np.mean(errors)
         med_err = np.median(errors)
         
