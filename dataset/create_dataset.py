@@ -281,7 +281,7 @@ def filtre(df):
     # On retire les lignes où la description est devenue vide ou trop courte
     df_final = df_final[df_final['description'].str.len() > 25]
 
-    return df_final.drop_duplicates(ignore_index=True)
+    return df_final.drop_duplicates(subset=['id'], keep='last', ignore_index=True)
 
 
 def worker(data_package, output_dir):

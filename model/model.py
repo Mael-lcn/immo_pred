@@ -167,3 +167,4 @@ class SOTARealEstateModel(nn.Module):
                 # EN EVAL / PROD : On renvoie les EUROS pour l'utilisateur
                 # (On applique l'exponentielle ici)
                 return torch.exp(log_vente), torch.exp(log_loc), attentions if return_attn else None
+
