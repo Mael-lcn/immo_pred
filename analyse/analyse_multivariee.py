@@ -80,6 +80,8 @@ def run_pca(df):
     plot_correlation_circle(pca, pca.components_[[0, 3]], df_num.columns,1,4) # Axes 1 4
     # pas besoin d'observer les autres axes
 
+
+    print( "TESSSSSSSSST", pca.components_[0])
     # Variance expliquée
     explained = pca.explained_variance_ratio_
     print("\nVariance expliquée par axe :")
@@ -193,8 +195,8 @@ def main():
     run_pca(df)
     df = pd.get_dummies(df, columns=["region"], drop_first=True)
     df = pd.get_dummies(df, columns=["property_type"], prefix="type")
-    find_number_clusters(df)
-    k_means(df)
+    #find_number_clusters(df)
+    #k_means(df)
   
 
 

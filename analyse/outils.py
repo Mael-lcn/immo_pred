@@ -108,10 +108,6 @@ def load_all_regions(folder_path):
     for file in csv_files:
         try:
             df_temp = charger_fichier(file)
-
-            # ❌ IMPORTANT : ne PAS écraser la colonne "region"
-            # ❌ Ne plus faire : df_temp["region"] = os.path.basename(file)
-
             df_list.append(df_temp)
 
         except Exception as e:
@@ -119,12 +115,65 @@ def load_all_regions(folder_path):
             continue
 
     df = pd.concat(df_list, ignore_index=True)
+    """"""
+    # Vérifie les IDs identiques
+    inspect_duplicates(df, subset=['id'])
+    if "id" in df.columns:
+        df = df.drop_duplicates(subset=["id"], keep="first")
+    else:
+        df = df.drop_duplicates(keep="first")
     print(f"\nDataset fusionné : {df.shape[0]} lignes, {df.shape[1]} colonnes")
     return df
 
 
 
 
+def inspect_duplicates(df, subset=None):
+    """
+    Affiche les lignes qui sont considérées comme des doublons.
+    subset: liste des colonnes à utiliser pour identifier le doublon (ex: ['id'] ou ['latitude', 'longitude', 'price'])
+    """
+    print(f"\n--- Inspection des doublons (sur la base de : {subset if subset else 'Toutes les colonnes'}) ---")
+    
+    # 1. Identifier TOUS les doublons (keep=False garde l'original et la copie pour l'affichage)
+    mask = df.duplicated(subset=subset, keep=False)
+    doublons = df[mask]
+    
+    if doublons.empty:
+        print("✅ Aucun doublon trouvé.")
+        return
+    
+    print(f"⚠️ {len(doublons)} lignes concernées (soit {len(doublons)//2} paires ou plus).")
+    
+    # 2. Trier pour les voir côte à côte
+    # On trie par le subset pour que les lignes identiques soient l'une sous l'autre
+    if subset:
+        doublons_tries = doublons.sort_values(by=subset)
+    else:
+        doublons_tries = doublons.sort_values(by=list(df.columns[:3])) # Tri par les premières colonnes par défaut
+        
+    # 3. Affichage (On affiche les colonnes clés pour vérifier)
+    cols_to_show = subset if subset else df.columns[:5] # On montre juste les colonnes pertinentes
+    # On ajoute 'price' et 'living_area_sqm' pour être sûr que c'est le même bien
+    extras = ['price', 'living_area_sqm', 'city']
+    cols_to_show = list(set(list(cols_to_show) + [c for c in extras if c in df.columns]))
+    
+    print(doublons_tries[cols_to_show].head(20)) # Affiche les 20 premiers pour contrôle
+    
+    # Optionnel : Sauvegarder dans un CSV pour tout vérifier à la main si gros doute
+    # doublons_tries.to_csv("verif_doublons.csv", sep=";", index=False)
+    print("----------------------------------------------------\n")
 
 
+def enleve_luxe(df,limite_prix=2000000):
 
+    print("\n === Filtrage des biens de luxe ===")
+
+    nb_avant = len(df)
+    df = df[df["price"] <= limite_prix].copy()
+    nb_apres = len(df)
+    
+    print(f"Filtre appliqué : On ignore les biens > {limite_prix:,.0f} €")
+    print(f"Lignes supprimées : {nb_avant - nb_apres} (ce sont les riches du graphique mdrr)")
+
+    return df

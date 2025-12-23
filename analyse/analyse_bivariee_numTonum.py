@@ -63,15 +63,16 @@ def showScatters_Plots(df):
 
 
             
+import matplotlib.pyplot as plt
+import pandas as pd
+# Assurez-vous que la fonction clean_outliers est définie quelque part,
+# sinon ce code ne fonctionnera pas sans elle.
+# def clean_outliers(df, cols, low, high):
+#     ...
 
 def show_scatter_raw_vs_clean(df, x, y="price", low=0.01, high=0.99):
-    """
-    Affiche deux scatter plots côte à côte :
-    - à gauche : données brutes
-    - à droite : données nettoyées par quantiles (low, high)
-    """
 
-    # 1) Sous-dataframe avec uniquement les deux colonnes
+
     df_xy = df[[x, y]].dropna()
 
     if df_xy.empty:
@@ -81,14 +82,35 @@ def show_scatter_raw_vs_clean(df, x, y="price", low=0.01, high=0.99):
     # 2) Version nettoyée pour la visualisation
     df_clean = clean_outliers(df_xy, [x, y], low=low, high=high)
 
-    # 3) Création des deux graphiques côte à côte
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharex=True, sharey=True)
+
+    
+    # Utilisez 'x' pour xlim et 'y' pour ylim
+    x_min, x_max = df_clean[x].min(), df_clean[x].max()
+    y_min, y_max = df_clean[y].min(), df_clean[y].max()
+    print(f"CBVXB XC,BDNBDFSBDxlim: {x_min} to {x_max}")
+
+    # Ajout d'une petite marge pour la visibilité (5%)
+    x_range = x_max - x_min
+    y_range = y_max - y_min
+    
+    # Définition des limites avec marge
+    xlim = (x_min - x_range * 0.05, x_max + x_range * 0.05)
+    ylim = (y_min - y_range * 0.05, y_max + y_range * 0.05)
+
+
+    # 4) Création des deux graphiques côte à côte
+    # Le paramètre sharex/sharey n'est plus nécessaire car nous allons définir les limites manuellement
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
     # --- Scatter brut ---
+    # Nous affichons quand même les données brutes, mais elles seront tronquées
+    # pour mettre l'accent sur la plage des données nettoyées.
     axes[0].scatter(df_xy[x], df_xy[y], alpha=0.3)
-    axes[0].set_title("Données brutes")
+    axes[0].set_title("Données brutes (Échelle des données nettoyées)")
     axes[0].set_xlabel(x)
     axes[0].set_ylabel(y)
+    axes[0].set_xlim(xlim) # Application des limites
+    axes[0].set_ylim(ylim) # Application des limites
     axes[0].grid(True)
 
     # --- Scatter clean ---
@@ -96,6 +118,8 @@ def show_scatter_raw_vs_clean(df, x, y="price", low=0.01, high=0.99):
     axes[1].set_title(f"Données nettoyées ({int(low*100)}–{int(high*100)}ᵉ quantile)")
     axes[1].set_xlabel(x)
     axes[1].set_ylabel(y)
+    axes[1].set_xlim(xlim) # Application des limites
+    axes[1].set_ylim(ylim) # Application des limites
     axes[1].grid(True)
 
     fig.suptitle(f"{y} en fonction de {x} : brut vs clean", y=1.02)

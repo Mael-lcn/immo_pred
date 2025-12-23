@@ -183,7 +183,7 @@ def main():
     df = load_all_regions(args.path)
     #df= charger_fichier(args.file)
     analyse_numerique_numerique(df)
-    #analyse_num_cat(df)
+    analyse_num_cat(df)
     #analyse_multilabels(df)
     #analyse_geo(df)
 
