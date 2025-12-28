@@ -90,7 +90,7 @@ def save_global_analysis(all_grads, all_attn_img, all_attn_txt, feature_names, e
 
         mean_err = np.mean(errors)
         med_err = np.median(errors)
-        
+
         plt.title(f"DISTRIBUTION DE L'ERREUR (Moy: {mean_err:.1f}% | Med: {med_err:.1f}%)", fontsize=12, fontweight='bold')
         plt.xlabel("Pourcentage d'erreur (Prédiction vs Réel)")
         plt.ylabel("Nombre de biens")
@@ -159,19 +159,19 @@ def run_eval_and_explain(model, dataloader, device, tokenizer, output_dir, featu
             # 1. Attention Balance (Dernière couche)
             last_attn = attentions[-1] 
             if last_attn.dim() == 4: last_attn = last_attn.mean(dim=1) # (B, Q, K)
-            
+
             # Le Token Query est le CLS Tabulaire (le dernier de Q)
             # Les Keys sont [Img1...ImgN, Texte]
             cls_attn = last_attn[:, -1, :] # (B, N_Img + 1)
-            
+
             # On sépare Img et Texte
             attn_imgs_vals = cls_attn[:, :-1] # Tout sauf le dernier
             attn_txt_vals  = cls_attn[:, -1]  # Le dernier
-            
+
             # On somme l'attention portée à toutes les images valides
             sum_imgs = (attn_imgs_vals * img_masks).sum(dim=1).cpu().numpy()
             sum_txt  = attn_txt_vals.cpu().numpy()
-            
+
             all_attn_sum_img.extend(sum_imgs)
             all_attn_sum_txt.extend(sum_txt)
 
@@ -180,7 +180,7 @@ def run_eval_and_explain(model, dataloader, device, tokenizer, output_dir, featu
             t_v_euro = torch.exp(targets[:, 0]).cpu().numpy().flatten()
             p_l_euro = torch.exp(p_loc_log).cpu().numpy().flatten()
             t_l_euro = torch.exp(targets[:, 1]).cpu().numpy().flatten()
-            
+
             m_v = masks[:, 0].cpu().numpy().astype(bool)
             m_l = masks[:, 1].cpu().numpy().astype(bool)
 
@@ -232,13 +232,14 @@ def save_metrics(preds, targets, cat_name, output_dir):
     print(f"\n>>> RÉSULTATS {cat_name}")
     print(f"    R²  : {r2:.4f}")
     print(f"    MAE : {mae:,.0f} €")
-    
+    print(f"    MSE : {mse:,.0f} €")
+
     # Scatter Plot
     plt.figure(figsize=(8, 8))
     plt.scatter(t_clean, p_clean, alpha=0.3, s=5, c='#1f77b4')
     lims = [min(t_clean.min(), p_clean.min()), max(t_clean.max(), p_clean.max())]
     plt.plot(lims, lims, 'r--', linewidth=2)
-    plt.title(f"{cat_name}: R²={r2:.3f} | MAE={mae:,.0f}€")
+    plt.title(f"{cat_name}: R²={r2:.3f} | MAE={mae:,.0f}€ MSE={mse:.3f} |")
     plt.xlabel("Prix Réel"); plt.ylabel("Prix Estimé")
     plt.grid(True, alpha=0.3)
     plt.savefig(os.path.join(output_dir, f"metrics_{cat_name}.png"))

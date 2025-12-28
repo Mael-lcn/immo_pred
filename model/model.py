@@ -13,9 +13,9 @@ from transformers import AutoModel
 class PeriodicEmbedding(nn.Module):
     def __init__(self, embed_dim, sigma=0.1):
         super().__init__()
-        # Initialisation non-trainable ou trainable selon la stratégie. 
         # Ici trainable permet au modèle d'ajuster les fréquences optimales.
         self.frequencies = nn.Parameter(torch.randn(embed_dim // 2) * sigma)
+
 
     def forward(self, x):
         # x: (Batch, 1) -> freq: (Batch, Dim/2)
@@ -52,6 +52,7 @@ class SOTAFeatureTokenizer(nn.Module):
         
         # 3. Token CLS (Learnable) qui servira à l'agrégation finale
         self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim))
+
 
     def forward(self, x_cont, x_cat):
         tokens = []
@@ -97,10 +98,11 @@ class CrossModalInteraction(nn.Module):
             nn.Linear(dim * 4, dim)
         )
 
+
     def forward(self, query_tokens, kv_tokens, key_padding_mask=None, return_attn=False):
         # Query = Tabulaire (C'est lui qu'on met à jour)
         # Key/Value = Contexte (Images + Texte)
-        
+
         q = self.norm_q(query_tokens)
         kv = self.norm_kv(kv_tokens)
 
@@ -169,8 +171,9 @@ class SOTARealEstateModel(nn.Module):
         if freeze_encoders:
             for p in self.img_encoder.parameters(): p.requires_grad = False
             for p in self.text_encoder.parameters(): p.requires_grad = False
-            
+
         self.apply(self._init_weights)
+
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):

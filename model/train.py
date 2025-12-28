@@ -1,6 +1,8 @@
 import os
 import json
 import argparse
+import re
+import glob
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -10,7 +12,6 @@ from transformers import AutoTokenizer
 from torch.utils.data import DataLoader
 
 # --- IMPORTS LOCAUX ---
-# On charge tes classes personnalisées
 from model import SOTARealEstateModel
 from data_loader import (
     RealEstateDataset, 
@@ -18,6 +19,8 @@ from data_loader import (
     prepare_preprocessors, 
     get_cols_config
 )
+
+
 
 # Force matplotlib à ne pas chercher d'écran (utile sur serveur)
 plt.switch_backend('agg')
@@ -43,8 +46,13 @@ def save_monitoring(history, checkpoint_dir):
 
     plt.figure(figsize=(10, 6))
     plt.plot(epochs, train_loss, marker='o', label='Train Loss', color='#1f77b4') # Bleu
-    if val_loss:
-        plt.plot(epochs, val_loss, marker='x', linestyle='--', label='Val Loss', color='#ff7f0e') # Orange
+    
+    # On filtre les valeurs > 0 pour ne pas tracer les 0.0 (skipped epochs)
+    val_epochs = [e for e, v in zip(epochs, val_loss) if v > 0]
+    val_values = [v for v in val_loss if v > 0]
+    
+    if val_values:
+        plt.plot(val_epochs, val_values, marker='x', linestyle='--', label='Val Loss', color='#ff7f0e') # Orange
     
     plt.title("Convergence SOTA : Train vs Validation")
     plt.xlabel("Époques")
@@ -70,10 +78,6 @@ class MaskedLogMSELoss(nn.Module):
         self.mse = nn.MSELoss(reduction='none') # On veut la perte par élément pour appliquer le masque
 
     def forward(self, pred_vente, pred_loc, targets, masks):
-        # pred_vente : [Batch, 1] (Prédiction du modèle)
-        # targets    : [Batch, 2] (Target Vente, Target Loc)
-        # masks      : [Batch, 2] (1 si la donnée existe, 0 sinon)
-
         target_vente = targets[:, 0].unsqueeze(1)
         target_loc   = targets[:, 1].unsqueeze(1)
         mask_vente   = masks[:, 0].unsqueeze(1)
@@ -83,7 +87,6 @@ class MaskedLogMSELoss(nn.Module):
         loss_vente = self.mse(pred_vente, target_vente) * mask_vente
         loss_loc   = self.mse(pred_loc, target_loc) * mask_loc
 
-        # Somme des erreurs / Nombre de vrais exemples (pour éviter la dilution par les zéros)
         total_loss = loss_vente.sum() + loss_loc.sum()
         denominator = mask_vente.sum() + mask_loc.sum()
         
@@ -102,7 +105,6 @@ def train_one_epoch(model, dataloader, optimizer, criterion, scaler, device, epo
 
     for batch in loop:
         # --- A. Chargement GPU ---
-        # Utilisation de non_blocking=True pour accélérer le transfert RAM -> VRAM
         imgs = batch['images'].to(device, non_blocking=True)
         img_masks = batch['image_masks'].to(device, non_blocking=True)
         input_ids = batch['input_ids'].to(device, non_blocking=True)
@@ -115,7 +117,6 @@ def train_one_epoch(model, dataloader, optimizer, criterion, scaler, device, epo
         # --- B. Forward & Backward ---
         optimizer.zero_grad(set_to_none=True) # Reset gradients
 
-        # AMP (Automatic Mixed Precision) : Boost vitesse sur GPU NVIDIA
         with torch.amp.autocast('cuda' if use_amp else 'cpu', enabled=use_amp):
             p_vente, p_loc = model(
                 images=imgs, 
@@ -127,7 +128,6 @@ def train_one_epoch(model, dataloader, optimizer, criterion, scaler, device, epo
             )
             loss = criterion(p_vente, p_loc, targets, masks)
 
-        # Gestion du gradient (avec ou sans scaler AMP)
         if scaler:
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -154,7 +154,7 @@ def validate(model, dataloader, criterion, device, use_amp):
     total_loss = 0
     count = 0
 
-    with torch.no_grad(): # <--- IMPORTANT : Coupe l'enregistrement des gradients (économise VRAM)
+    with torch.no_grad(): # <--- IMPORTANT : Coupe l'enregistrement des gradients
         for batch in loop:
             imgs = batch['images'].to(device, non_blocking=True)
             img_masks = batch['image_masks'].to(device, non_blocking=True)
@@ -181,18 +181,24 @@ def validate(model, dataloader, criterion, device, use_amp):
 # ==============================================================================
 def main():
     parser = argparse.ArgumentParser()
-    # Dossiers séparés physiquement (générés par ton script de split)
+    # Dossiers séparés physiquement
     parser.add_argument('--train_csv', type=str, default='../output/train')
     parser.add_argument('--val_csv', type=str, default='../output/val')
-    # Les images sont généralement dans un dossier commun
     parser.add_argument('--img_dir', type=str, default='../output/filtered_images')
-    
+
     # Paramètres d'entraînement
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints')
-    parser.add_argument('--batch_size', type=int, default=16) # Ajuster selon VRAM (16 ou 32)
+    parser.add_argument('--batch_size', type=int, default=16) 
     parser.add_argument('--epochs', type=int, default=30)
-    parser.add_argument('--lr', type=float, default=1e-4) # 0.0001 est standard pour les Transformers
+    parser.add_argument('--lr', type=float, default=1e-4) 
     parser.add_argument('--workers', type=int, default=4)
+
+    # --- NOUVEAU : Argument pour reprendre l'entraînement ---
+    parser.add_argument('--resume_from', type=str, default=None, 
+                        help="Chemin vers un fichier .pt pour reprendre l'entraînement (ex: checkpoints/model_ep15.pt)")
+    parser.add_argument('--patience', type=int, default=5, 
+                        help="Nombre de fois ou on autorise la stagnation")
+
     args = parser.parse_args()
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -211,17 +217,16 @@ def main():
         use_amp = False
         print("[INIT] Mode: CPU")
 
-    # 2. Calibration des Données (CRITIQUE : UNIQUEMENT SUR TRAIN)
-    # On apprend "le monde" à travers le Train Set uniquement pour ne pas tricher.
+    # 2. Calibration des Données
     print("[DATA] Calibration des scalers et vocabulaires sur le TRAIN...")
     cont_cols, cat_cols, text_cols = get_cols_config()
     
-    # prepare_preprocessors renvoie les OBJETS calibrés (scaler, modes, mappings)
+    # Calibration sur le train uniquement
     scaler_obj, medians, modes, cat_mappings, cat_dims = prepare_preprocessors(args.train_csv, cont_cols, cat_cols)
     
     tokenizer = AutoTokenizer.from_pretrained('almanach/camembert-base')
 
-    # 3. Création des Datasets & Loaders
+    # 3. Datasets & Loaders
     print(f"[DATA] Chargement Train : {args.train_csv}")
     train_ds = RealEstateDataset(
         df_or_folder=args.train_csv, img_dir=args.img_dir, tokenizer=tokenizer,
@@ -230,14 +235,12 @@ def main():
     )
     
     print(f"[DATA] Chargement Validation : {args.val_csv}")
-    # Pour la Validation, on réutilise les objets calibrés ci-dessus (scaler_obj, etc.)
     val_ds = RealEstateDataset(
         df_or_folder=args.val_csv, img_dir=args.img_dir, tokenizer=tokenizer,
         scaler=scaler_obj, medians=medians, modes=modes, cat_mappings=cat_mappings,
         cont_cols=cont_cols, cat_cols=cat_cols
     )
 
-    # Note : shuffle=True pour Train, shuffle=False pour Val
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size, shuffle=True, 
         num_workers=args.workers, collate_fn=real_estate_collate_fn, pin_memory=True
@@ -253,21 +256,51 @@ def main():
     model = SOTARealEstateModel(
         num_continuous=len(cont_cols),
         cat_cardinalities=cat_dims,
-        img_model_name='convnext_large.fb_in1k', # Très bon modèle vision
+        img_model_name='convnext_large.fb_in1k', 
         text_model_name='almanach/camembert-base',
         fusion_dim=512,
         depth=4,
-        freeze_encoders=True # On gèle CamemBERT et ConvNext au début pour stabiliser
+        freeze_encoders=True 
     ).to(device)
 
-    # Astuce SOTA : Initialisation intelligente des biais de sortie
-    # On initialise le bias pour qu'il prédise le prix moyen dès le début.
-    # Log(250,000) ~= 12.4
-    model.head_price[-1].bias.data.fill_(12.4)
-    # Log(800) ~= 6.7
-    model.head_rent[-1].bias.data.fill_(6.7)
+    # Initialisation des biais de sortie (Log Space)
+    model.head_price[-1].bias.data.fill_(12.4) # Log(250k)
+    model.head_rent[-1].bias.data.fill_(6.7)   # Log(800)
 
-    # Compilation PyTorch 2.0 (Accélération gratuite si dispo)
+    # ==============================================================================
+    # 5. GESTION DE LA REPRISE (RESUME FROM CHECKPOINT)
+    # ==============================================================================
+    start_epoch = 1
+    
+    if args.resume_from:
+        if os.path.exists(args.resume_from):
+            print(f"[RESUME] Chargement du checkpoint : {args.resume_from}")
+            # Chargement des poids
+            checkpoint = torch.load(args.resume_from, map_location=device)
+            
+            # Nettoyage des clés si le modèle avait été compilé (_orig_mod.)
+            new_state_dict = {}
+            for k, v in checkpoint.items():
+                if k.startswith("_orig_mod."):
+                    new_state_dict[k[10:]] = v
+                else:
+                    new_state_dict[k] = v
+            
+            model.load_state_dict(new_state_dict)
+
+            # Tentative de déduction de l'époque de départ via le nom du fichier
+            # Ex: model_ep15.pt -> start_epoch = 16
+            match = re.search(r'ep(\d+)', args.resume_from)
+            if match:
+                last_epoch = int(match.group(1))
+                start_epoch = last_epoch + 1
+                print(f"[RESUME] Reprise à l'époque {start_epoch}")
+            else:
+                print("[RESUME] Impossible de lire l'époque dans le nom du fichier. Reprise à l'époque 1 par défaut.")
+        else:
+            print(f"[ERREUR] Le fichier checkpoint {args.resume_from} n'existe pas. Démarrage à zéro.")
+
+    # Compilation PyTorch 2.0
     if torch.cuda.is_available():
         try: 
             model = torch.compile(model)
@@ -280,45 +313,80 @@ def main():
     criterion = MaskedLogMSELoss()
     scaler_amp = torch.amp.GradScaler('cuda') if use_amp else None
 
-    # 5. Boucle Principale
-    history = {'epoch': [], 'train_loss': [], 'val_loss': []}
+    # 6. Boucle Principale
+    # Si on reprend, on charge l'historique existant si possible, sinon on repart à zéro
+    history_path = os.path.join(args.checkpoint_dir, "training_history.json")
+    if args.resume_from and os.path.exists(history_path):
+        try:
+            with open(history_path, 'r') as f:
+                history = json.load(f)
+            print("[RESUME] Historique chargé.")
+        except:
+            history = {'epoch': [], 'train_loss': [], 'val_loss': []}
+    else:
+        history = {'epoch': [], 'train_loss': [], 'val_loss': []}
+        
     best_val_loss = float('inf')
 
-    print(f"\n[TRAIN] Démarrage : {len(train_ds)} train samples | {len(val_ds)} val samples.")
+    # Si l'historique existe, on récupère le meilleur val_loss connu pour ne pas le perdre
+    val_losses_clean = [v for v in history.get('val_loss', []) if v > 0]
+    if val_losses_clean:
+        best_val_loss = min(val_losses_clean)
+        print(f"[RESUME] Record Val Loss actuel : {best_val_loss:.4f}")
 
-    for epoch in range(1, args.epochs+1):
+    print(f"\n[TRAIN] Démarrage Ep {start_epoch} -> {args.epochs}")
+
+    stagnation_counter = 0
+
+    # On commence la boucle à start_epoch
+    for epoch in range(start_epoch, args.epochs+1):
         # A. Phase d'Apprentissage
         train_loss = train_one_epoch(
             model, train_loader, optimizer, criterion, 
             scaler_amp, device, epoch, args.epochs, use_amp
         )
         
-        # B. Phase de Validation (Conditionnelle : Seulement >= 20)
-        val_loss = None # On initialise à None
+        # B. Phase de Validation (Conditionnelle : Seulement > 10)
+        val_loss = None 
 
-        if epoch > 20:
+        if epoch > 10:
             val_loss = validate(model, val_loader, criterion, device, use_amp)
             print(f" -> Ep {epoch}: Train={train_loss:.4f} | Val={val_loss:.4f}")
         else:
             print(f" -> Ep {epoch}: Train={train_loss:.4f} | Val=(Skipped)")
 
-        # C. Logs (On met une valeur placeholder si pas de validation pour ne pas casser les graphes)
+        # C. Logs
         history['epoch'].append(epoch)
         history['train_loss'].append(train_loss)
-        # Si pas de validation, on remet la dernière connue ou None, ici on met None pour l'ignorer
         history['val_loss'].append(val_loss if val_loss is not None else 0.0)
         save_monitoring(history, args.checkpoint_dir)
 
         # D. Checkpointing Intelligent
-        # On ne sauvegarde 'best_model.pt' QUE si on bat le record de validation
-        if (epoch > 20) and (val_loss < best_val_loss):
-            best_val_loss = val_loss
-            torch.save(model.state_dict(), os.path.join(args.checkpoint_dir, "best_model.pt"))
-            print(f"    *** NEW RECORD! best_model.pt sauvegardé (Val: {val_loss:.4f}) ***")
+        if epoch > 10:
+            # Si on s'améliore
+            if (val_loss < best_val_loss):
+                stagnation_counter = 0
+                best_val_loss = val_loss
+                torch.save(model.state_dict(), os.path.join(args.checkpoint_dir, f"best_model_ep{epoch}.pt"))
+                print(f"    *** NEW RECORD! best_model.pt sauvegardé (Val: {val_loss:.4f}) ***")
 
-        # Sauvegarde périodique (Backups de sécurité tous les 5 epochs)
+                for f in glob.glob(os.path.join(args.checkpoint_dir, "best_model_*.pt")):
+                    os.remove(f)
+
+            # Cas : On ne s'améliore pas
+            else:
+                stagnation_counter += 1
+                print(f"    [PATIENCE] Pas d'amélioration ({stagnation_counter}/{args.patience})")
+
+                # ARRÊT PRÉCOCE
+                if stagnation_counter >= args.patience:
+                    print(f"\n[STOP] Early Stopping déclenché ! Pas de progrès depuis {args.patience} époques.")
+                    print(f"       Meilleur score final : {best_val_loss:.4f}")
+                    break # On sort de la boucle 'for', fin de l'entraînement
+
         elif epoch % 5 == 0:
             torch.save(model.state_dict(), os.path.join(args.checkpoint_dir, f"model_ep{epoch}.pt"))
+            print(f"    [BACKUP] model_ep{epoch}.pt sauvegardé.")
 
     print("[FIN] Entraînement terminé.")
 
