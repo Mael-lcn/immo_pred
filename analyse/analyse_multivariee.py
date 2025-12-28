@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from outils import load_all_regions
+from outils import load_all_regions,clean_outliers
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.metrics import silhouette_score,mean_absolute_error, root_mean_squared_error, r2_score
@@ -47,16 +47,28 @@ def plot_correlation_circle(pca, components, feature_names,axe_x=0, axe_y=1):
 
 
 
-def run_pca(df):
+def run_pca(df,low=0.1, high=0.99):
     """
     Applique une PCA propre sur les variables numériques filtrées.
     """
+
+
+    cols_to_remove = ["id", "dataset_source", "postal_code", "estimated_notary_fees"]
+    df = df.drop(columns=cols_to_remove, errors="ignore")
     print("\n=== PCA (Analyse en Composantes Principales) ===")
 
     # Sélectionner les colonnes numériques utiles
     num_cols = get_variable_types(df)[0]
-    df_num = df[num_cols].copy()
+    
+    # 2. Nettoyer les outliers sur le DataFrame global
+    # On passe 'df' pour filtrer les lignes, mais on récupère le résultat dans 'df_cleaned'
+    df_cleaned = clean_outliers(df, num_cols, low, high)
 
+    # 3. CRUCIAL : Ne garder QUE les colonnes numériques pour la PCA
+    # C'est ici que l'erreur est corrigée : on re-filtre df_cleaned
+    df_num = df_cleaned[num_cols].copy()
+
+    # 4. Gestion des NaN restants (médiane)
     df_num = df_num.fillna(df_num.median(numeric_only=True))
 
 
@@ -99,10 +111,11 @@ def run_pca(df):
     plt.savefig("plots/_pca_scree_plot.png")
     plt.close()
 
-def k_means(df):
+def k_means(df,low=0.01,high=0.99):
     k=4
     # 1) Récupérer les noms de colonnes numériques
     num_cols = get_variable_types(df)[0]   # <- Index des colonnes numériques
+    df= clean_outliers(df, num_cols, low, high)
 
     X = df[num_cols].dropna()  
 
@@ -127,9 +140,11 @@ def k_means(df):
 
 
 
-def find_number_clusters(df):
+def find_number_clusters(df,low=0.01,high=0.99):
     os.makedirs("plots", exist_ok=True)
     num_cols = get_variable_types(df)[0]
+    df= clean_outliers(df, num_cols, low, high)
+
         # 2) Données (et plus les noms de colonnes !)
     X = df[num_cols].dropna()
 

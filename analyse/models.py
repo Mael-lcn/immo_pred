@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
 import os
-from outils import load_all_regions,enleve_luxe
+from outils import load_all_regions,enleve_luxe, clean_outliers,get_variable_types
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.impute import SimpleImputer
@@ -243,25 +243,19 @@ def xgboost_regression(df,type=None):
     y = df_valid["price"]
 
     # Clustering
-
-    #le feature engineering, latitude,longitude sont pas suffisant, je crée des clusters geographiques pour obtenir des infos plus précises sur des endroits spécifiques de régions. j'utilise Kmeans pour ça
-    print("Création des clusters géographiques...")
-    kmeans = KMeans(n_clusters=500, random_state=42, n_init=10)
-    df_valid['geo_cluster'] = kmeans.fit_predict(df_valid[['latitude', 'longitude']])
-    df_valid['geo_cluster'] = df_valid['geo_cluster'].astype('category') #ici je mets en format categorie car les valeurs snt pas en echelle, la zone 1 n'est pas forcément plus riche ou plus pauvre que la zone 0, category permet a xgboost de gérere cette feature sous forme d'etiquette
-
-
+    
     # Préparation de X
     X = df_valid.drop(columns=["price"]) # on supp le prix sinon bah pas de ML mdrr
     X = X.select_dtypes(include=["number", "category"]) # On garde que les nombres ett les catégorie (les types que xgboost supporte ) 
 
 
-    X['geo_cluster'] = X['geo_cluster'].astype(int)
     
   
 
     # ===DECOUPAGE TRAIN/VAL/TEST 
     print("Découpage des données (Train / Validation / Test)...")
+    
+
     
     # Étape A : On met de côté 15% pour le TEST FINAL (Le coffre-fort)
     X_temp, X_test, y_temp, y_test = train_test_split(
@@ -274,6 +268,23 @@ def xgboost_regression(df,type=None):
         X_temp, y_temp, test_size=0.176, random_state=42
     )
     
+
+    print("Création des clusters géographiques...")
+
+    # On fit SEULEMENT sur le train
+    kmeans = KMeans(n_clusters=100, random_state=42, n_init=10)
+    kmeans.fit(X_train[['latitude', 'longitude']])
+
+    #le feature engineering, latitude,longitude sont pas suffisant, je crée des clusters geographiques pour obtenir des infos plus précises sur des endroits spécifiques de régions. j'utilise Kmeans pour ça
+    X_train['geo_cluster'] = kmeans.predict(X_train[['latitude', 'longitude']])
+    X_val['geo_cluster'] = kmeans.predict(X_val[['latitude', 'longitude']])
+    X_test['geo_cluster'] = kmeans.predict(X_test[['latitude', 'longitude']])
+
+    # Conversion en int ou category
+    X_train['geo_cluster'] = X_train['geo_cluster'].astype(int)
+    X_val['geo_cluster'] = X_val['geo_cluster'].astype(int)
+    X_test['geo_cluster'] = X_test['geo_cluster'].astype(int)
+
     # Résumé des tailles
     print(f"--> Train : {len(X_train)} lignes")
     print(f"--> Val   : {len(X_val)} lignes (pour arrêter le modèle)")
@@ -308,62 +319,77 @@ def xgboost_regression(df,type=None):
         eval_set=[(X_val, y_val_log)], 
         verbose=False
     )
+# === PRÉDICTIONS ===
+    print("Calcul des scores sur les 3 ensembles...")
 
-    # PRÉDICTIONS FINALES (Sur le TEST que le modèle n'a jamais vu)
-    print("Calcul des scores sur le Test Set...")
+    # 1. TEST (La note finale)
     y_pred_test_log = model.predict(X_test)
-    y_pred_test_final = np.expm1(y_pred_test_log) # Retour en Euros
+    y_pred_test_final = np.expm1(y_pred_test_log)
 
-    # Aussi sur le train pour comparer l'overfitting
+    # 2. TRAIN (Pour voir l'apprentissage)
     y_pred_train_log = model.predict(X_train)
     y_pred_train_final = np.expm1(y_pred_train_log)
 
-    #  CALCUL DES MÉTRIQUES
+    # 3. VALIDATION (Pour voir l'optimisation)
+    y_pred_val_log = model.predict(X_val)
+    y_pred_val_final = np.expm1(y_pred_val_log)
+
+    # === CALCUL DES MÉTRIQUES ===
+    # Test
     mae_test = mean_absolute_error(y_test, y_pred_test_final)
     rmse_test = root_mean_squared_error(y_test, y_pred_test_final)
     r2_test = r2_score(y_test, y_pred_test_final)
 
+    # Train
     r2_train = r2_score(y_train, y_pred_train_final)
     mae_train = mean_absolute_error(y_train, y_pred_train_final)
     rmse_train = root_mean_squared_error(y_train, y_pred_train_final)
 
-    #  AFFICHAGE PROPRE
-    print("\n" + "="*60)
-    print(f"{'MÉTRIQUE':<10} | {'TRAIN (Apprentissage)':<20} | {'TEST (Note Finale)':<20}")
-    print("="*60)
-    print(f"{'R²':<10} | {r2_train:.2%}             | {r2_test:.2%}")
-    print(f"{'MAE':<10} | {mae_train:,.0f} €             | {mae_test:,.0f} €")
-    print(f"{'RMSE':<10} | {rmse_train:,.0f} €             | {rmse_test:,.0f} €")
-    print("="*60)
+    # Validation
+    r2_val = r2_score(y_val, y_pred_val_final)
+    mae_val = mean_absolute_error(y_val, y_pred_val_final)
+    rmse_val = root_mean_squared_error(y_val, y_pred_val_final)
 
+    # === AFFICHAGE PROPRE (3 COLONNES) ===
+    print("\n" + "="*95)
+    print(f"{'MÉTRIQUE':<10} | {'TRAIN':<20} | {'VALIDATION':<20} | {'TEST (Final)':<20}")
+    print("="*95)
+    print(f"{'R²':<10} | {r2_train:.2%}             | {r2_val:.2%}             | {r2_test:.2%}")
+    print(f"{'MAE':<10} | {mae_train:,.0f} €             | {mae_val:,.0f} €             | {mae_test:,.0f} €")
+    print(f"{'RMSE':<10} | {rmse_train:,.0f} €             | {rmse_val:,.0f} €             | {rmse_test:,.0f} €")
+    print("="*95)
 
     # Analyse Overfitting
-    gap = r2_train - r2_test
-    print(f"\nÉcart R² (Train - Test) : {gap:.2%}")
-    if gap > 0.15:
-        print(" ALERTE : Potentiel gros surapprentissage.")
-    elif gap > 0.05:
-        print("Léger surapprentissage acceptable.")
+    gap_train_val = r2_train - r2_val
+    gap_val_test = r2_val - r2_test
+
+    print(f"\nÉcart Train / Val : {gap_train_val:.2%}")
+    print(f"Écart Val / Test  : {gap_val_test:.2%}")
+    
+    if gap_train_val > 0.15:
+        print("⚠️ ALERTE : Gros surapprentissage (Le modèle apprend par cœur le train).")
+    elif abs(gap_val_test) > 0.05:
+         print("⚠️ ALERTE : Instabilité (Le score Validation ne reflète pas bien le Test).")
     else:
-        print("Excellent : Modèle très robuste.")
-
-
+        print("✅ Excellent : Modèle robuste et cohérent sur les 3 sets.")
 
     importances = pd.DataFrame({
-    "feature": X.columns,
-    "importance": model.feature_importances_
+        "feature": X_train.columns,
+        "importance": model.feature_importances_
     }).sort_values(by="importance", ascending=False)
+
+
 
 
     # Afffichage dans le terminal
     print("\n=== Importance des variables (Top 25) ===")
     print(importances.head(25))
 
-    # ---- Plot importance des variables ----
-    importance_plot(model, X)
-    # ---- Plot Réel vs Prédit ----
+    #Plot importance des variables
+    importance_plot(model, X_train) # on mets X train just epour les noms de colonnes pas pour ces valeurs
+    #plot Réel vs  Prédit
     regression_plot(y_test, y_pred_test_final, type="xgb")
-    # ---- Plot Résidus ----
+    # Plot Résidus
     residuals_plot(y_test, y_pred_test_final)
    
     return model
@@ -384,14 +410,17 @@ def main():
     df = load_all_regions(args.path)
 
 
-    #enleve les logements de luxe, limite à fixer, interessant  sur le model des maisons dans achat , (logique vu à quel point le prix peut être variable ici)
-    #df = enleve_luxe(df,limite_prix=2000000)
+    num_cols = get_variable_types(df)[0]
+
+    # On exclut ainsi les booléens (0/1) et les catégories One-Hot
+    cols_to_clean = [c for c in num_cols if df[c].nunique() > 2]
+    df= clean_outliers(df, cols_to_clean, 0.01, 0.99)
 
 
    
     #random_forest_regression(df)
 
-    xgboost_regression(df,"A")
+    xgboost_regression(df)     # xgboost_regression(df,'A') se concentre sur les apparts / xgboost_regression(df,'M') sur les maisons
 
 
 if __name__ == "__main__":

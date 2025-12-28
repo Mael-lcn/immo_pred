@@ -8,6 +8,8 @@ from outils import load_all_regions
 import numpy as np
 import seaborn as sns
 import os
+pd.set_option('display.max_columns', None) # Affiche toutes les colonnes
+pd.set_option('display.width', 1000)       # Évite les retours à la ligne moches
 # appliquer des derniers filtres  plus tard (viager, type Appartement, et explique pourquoi on a besoin de les enlever) => crée des anomalies statistiques meme en retirant les outliers trop important
 # trouver un moyen sympa d'analyser les colonnes geographiques (lat,long), une plus-value à region,ville
 
@@ -40,7 +42,7 @@ def affiche_caracteristique_par_defaut(df):
     print(df.describe())
 
 
-def stats_univariees(df,low=0.1,high=0.99): # Les stats varient en fonction de l'élimination des outliers, les paramètres sont donc personnalisables
+def stats_univariees(df,low=0.01,high=0.99): # Les stats varient en fonction de l'élimination des outliers, les paramètres sont donc personnalisables
 
     #les variables numériques 
 
@@ -63,7 +65,7 @@ def stats_univariees(df,low=0.1,high=0.99): # Les stats varient en fonction de l
 
 
 
-def detect_outliers_iqr(df, q1=0.1,q3=0.99):
+def detect_outliers_iqr(df, q1=0.01,q3=0.99):
     # petit retour : Les prix ont enormément d'outliers  et c'est normal, il faudra peut être mettre des quantiles spécifiques à eux (0.5,0.95 par exemple) ou log + detect outliers 
     # il y a un outlier surprenant, sur l'année de construction, ce sont des professionels qui ont enregistré l'annonce, on s'attenderait pas à voir des -2300 ou 4000.
     num_cols= get_variable_types(df)[0]
@@ -224,11 +226,11 @@ def main():
     detect_outliers_iqr(df)
     stats_univariees(df)
     
-    affiche_caracteristique_par_defaut(df)
-    check_data_quality(df)
-    showCatPlots(df)
-    showBoxPlots(df)   
-    showHistoPlots(df)
+ #   affiche_caracteristique_par_defaut(df)
+  #  check_data_quality(df)
+   # showCatPlots(df)
+    #showBoxPlots(df)   
+    #showHistoPlots(df)
 
 
      

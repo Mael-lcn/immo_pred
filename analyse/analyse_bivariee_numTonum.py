@@ -7,8 +7,7 @@ import os
 # m atrice de corrélation 
 def showMat_Corr(df,low=0.01, high=0.99):
     os.makedirs("plots", exist_ok=True)
-    #petit retour: le prix est mal corrélé à la surface habitable même après avoir clean les outliers (bizarre)
-    # On a vu dans l'analyse univariee que d'autres types de biens que Maison/appartemnt étaient présent, ça doit jouer 
+   
 
     # récupérer les colonnes numériques filtrées
     num_cols = get_variable_types(df)[0]
@@ -38,7 +37,7 @@ def showMat_Corr(df,low=0.01, high=0.99):
     )
     plt.title("Matrice de corrélation")
     plt.tight_layout()
-    plt.savefig(f"plots/univ_cat_correlation_matrix.png")
+    plt.savefig(f"plots/correlation_matrix.png")
     plt.close()
 
 def showScatters_Plots(df):
@@ -56,73 +55,36 @@ def showScatters_Plots(df):
     for x in variables_scatters:
         if x in df.columns and "price" in df.columns:
             print(f"\nScatter plot prix vs {x} (brut vs clean)")
-            show_scatter_raw_vs_clean(df, x, "price") # prix par defaut, mais on pourra peut etre comparé à autre chose
+            show_scatter(df, x, "price") # prix par defaut, mais on pourra peut etre comparé à autre chose
 
 
 
 
 
             
-import matplotlib.pyplot as plt
-import pandas as pd
-# Assurez-vous que la fonction clean_outliers est définie quelque part,
-# sinon ce code ne fonctionnera pas sans elle.
-# def clean_outliers(df, cols, low, high):
-#     ...
-
-def show_scatter_raw_vs_clean(df, x, y="price", low=0.01, high=0.99):
 
 
+def show_scatter(df, x, y="price"):
+    # Sélection des colonnes et suppression des NaNs
     df_xy = df[[x, y]].dropna()
 
     if df_xy.empty:
         print(f"Aucune donnée disponible pour {x} et {y}.")
         return
 
-    # 2) Version nettoyée pour la visualisation
-    df_clean = clean_outliers(df_xy, [x, y], low=low, high=high)
+    # Création d'un seul graphique (plus besoin de subplots)
+    plt.figure(figsize=(8, 6))
 
-
+    # Affichage du scatter plot
+    plt.scatter(df_xy[x], df_xy[y], alpha=0.3)
     
-    # Utilisez 'x' pour xlim et 'y' pour ylim
-    x_min, x_max = df_clean[x].min(), df_clean[x].max()
-    y_min, y_max = df_clean[y].min(), df_clean[y].max()
-    print(f"CBVXB XC,BDNBDFSBDxlim: {x_min} to {x_max}")
+    # Titre et labels
+    plt.title(f"{y} en fonction de {x}")
+    plt.xlabel(x)
+    plt.ylabel(y)
+    plt.grid(True)
 
-    # Ajout d'une petite marge pour la visibilité (5%)
-    x_range = x_max - x_min
-    y_range = y_max - y_min
-    
-    # Définition des limites avec marge
-    xlim = (x_min - x_range * 0.05, x_max + x_range * 0.05)
-    ylim = (y_min - y_range * 0.05, y_max + y_range * 0.05)
-
-
-    # 4) Création des deux graphiques côte à côte
-    # Le paramètre sharex/sharey n'est plus nécessaire car nous allons définir les limites manuellement
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
-    # --- Scatter brut ---
-    # Nous affichons quand même les données brutes, mais elles seront tronquées
-    # pour mettre l'accent sur la plage des données nettoyées.
-    axes[0].scatter(df_xy[x], df_xy[y], alpha=0.3)
-    axes[0].set_title("Données brutes (Échelle des données nettoyées)")
-    axes[0].set_xlabel(x)
-    axes[0].set_ylabel(y)
-    axes[0].set_xlim(xlim) # Application des limites
-    axes[0].set_ylim(ylim) # Application des limites
-    axes[0].grid(True)
-
-    # --- Scatter clean ---
-    axes[1].scatter(df_clean[x], df_clean[y], alpha=0.3)
-    axes[1].set_title(f"Données nettoyées ({int(low*100)}–{int(high*100)}ᵉ quantile)")
-    axes[1].set_xlabel(x)
-    axes[1].set_ylabel(y)
-    axes[1].set_xlim(xlim) # Application des limites
-    axes[1].set_ylim(ylim) # Application des limites
-    axes[1].grid(True)
-
-    fig.suptitle(f"{y} en fonction de {x} : brut vs clean", y=1.02)
+    # Sauvegarde
     plt.tight_layout()
     plt.savefig(f"plots/scatter_{x}_vs_{y}.png")
     plt.close()

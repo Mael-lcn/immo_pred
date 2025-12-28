@@ -181,10 +181,13 @@ def main():
 
     args = parser.parse_args()  
     df = load_all_regions(args.path)
-    #df= charger_fichier(args.file)
+
+    num_cols = get_variable_types(df)[0]
+    df= clean_outliers(df, num_cols, 0.01, 0.99)
+
     analyse_numerique_numerique(df)
     analyse_num_cat(df)
-    #analyse_multilabels(df)
+    analyse_multilabels(df)
     #analyse_geo(df)
 
 
