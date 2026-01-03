@@ -17,12 +17,11 @@ plt.rcParams['font.family'] = 'sans-serif'
 
 
 # --- GESTION DES CLÉS (FR -> EN) ---
-# Basé sur le dictionnaire fourni : on testera d'abord la clé FR,
-# puis la clé EN correspondante. Si aucune n'existe, on laisse planter.
+# Pas propre... Faire un dosseir ressoucre/trad.json
 def choose_col_name(df, fr_key, en_key):
     """
     Retourne le nom de colonne existant dans df : on teste la clé FR puis EN.
-    Si aucune n'existe, lève KeyError (on laisse planter comme demandé).
+    Si aucune n'existe, lève KeyError.
     """
     if fr_key in df.columns:
         return fr_key
@@ -53,7 +52,6 @@ def get_chunk_stats(file_list):
     dfs = []
     for csv_path in file_list:
         try:
-            # low_memory=False pour éviter les Warnings sur les types mixtes
             dfs.append(pd.read_csv(csv_path, sep=";", quotechar='"', low_memory=False))
         except Exception:
             pass
@@ -65,11 +63,8 @@ def get_chunk_stats(file_list):
     total_rows = len(df_chunk)
     nan_counts = df_chunk.isna().sum()
 
-    # --- GESTION DES CLÉS : on tente FR puis EN (si aucune -> plantage) ---
-    # Remarques : les noms anglais sont pris depuis le dictionnaire fourni.
-    # type_bien -> 'type_bien' (FR) or 'property_type' (EN)
+
     type_bien_col = choose_col_name(df_chunk, 'type_bien', 'property_type')
-    # type_vente -> 'type_vente' (FR) or 'dataset_source' (EN) selon le dict fourni
     type_vente_col = choose_col_name(df_chunk, 'type_vente', 'dataset_source')
 
     # 2. Compte par Type de Bien (Maison, Appartement, etc.)
@@ -178,6 +173,7 @@ def generate_plots(df_density, type_counts, out_dir):
     plt.savefig(os.path.join(out_dir, 'plot_property_types.png'), dpi=300)
     plt.close()
 
+
 def run(args):
     t0 = time.monotonic()
 
@@ -212,13 +208,9 @@ def run(args):
 
     # 2. Maison vs Appartement
     pt_counts = final['property_type_counts']
-    # On cherche les clés 'Maison' et 'Appartement' (sensible à la casse dans le CSV)
-    # On utilise .get() pour éviter un crash si le type n'existe pas
     nb_maison = pt_counts.get('Maison', 0)
     nb_appart = pt_counts.get('Appartement', 0)
 
-    # Si les clés sont en minuscules dans ton CSV, on peut tenter une somme plus robuste :
-    # nb_maison = pt_counts[pt_counts.index.str.lower() == 'maison'].sum()
 
     # --- AFFICHAGE DU RAPPORT ---
     print("\n" + "="*50)

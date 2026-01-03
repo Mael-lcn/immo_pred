@@ -1,9 +1,0 @@
-export REQUESTS_CA_BUNDLE=""
-export PYTHONHTTPSVERIFY=0
-export CONDARC="/tempory/21500562/conda_data/.condarc"
-export HF_HOME="/tempory/21500562/conda_data/huggingface_cache"
-export PIP_CACHE_DIR="/tempory/21500562/conda_data/pip_cache"
-export TRITON_CACHE_DIR="/tempory/21500562/conda_data/triton_cache"
-export MPLCONFIGDIR="/tempory/21500562/conda_data/matplotlib_cache"
-export HF_TOKEN="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"
-export HF_HUB_ENABLE_HF_TRANSFER=0

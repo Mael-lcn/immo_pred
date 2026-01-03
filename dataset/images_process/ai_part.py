@@ -43,7 +43,7 @@ def _make_bnb_config():
 def try_compile_model(model, name):
     """Tente de compiler le modèle avec torch.compile (Linux/WSL uniquement, gain de vitesse)."""
     compiled = False
-    if hasattr(torch, "compile") and os.name != 'nt': # torch.compile souvent instable sous Windows pur
+    if hasattr(torch, "compile"):
         try:
             print(f"[AI] Tentative torch.compile() pour {name} ...")
             model = torch.compile(model)
@@ -60,7 +60,7 @@ def try_compile_model(model, name):
 
 def init_models(device="cuda",
                 clip_hf_id="openai/clip-vit-base-patch32",
-                visual_id="facebook/dinov2-base"): # DINOv2 est recommandé par défaut
+                visual_id="facebook/dinov2-base"):
     """
     Charge CLIP et le modèle Visuel (DINO).
     Retourne un tuple contenant les objets nécessaires à l'inférence.
@@ -75,23 +75,23 @@ def init_models(device="cuda",
     bnb_cfg = _make_bnb_config()
     if bnb_cfg:
         print("[AI] Quantization 4-bit activée.")
-    
+
     # ---------------------------------------------------------
     # A. CHARGEMENT CLIP (Filtrage sémantique)
     # ---------------------------------------------------------
     print(f"[AI] Chargement CLIP : {clip_hf_id}...")
     try:
         proc_clip = CLIPProcessor.from_pretrained(clip_hf_id)
-        
+
         # Mappage automatique pour quantization, sinon manuel
         clip_args = {"quantization_config": bnb_cfg, "device_map": "auto"} if bnb_cfg else {"device_map": device}
         if device == "cpu": clip_args = {} # Pas de device_map sur CPU
 
         model_clip = CLIPModel.from_pretrained(clip_hf_id, **clip_args)
         model_clip.eval()
-        
+
         if device == "cpu": model_clip = model_clip.to("cpu")
-        
+
         model_clip, _ = try_compile_model(model_clip, "CLIP")
     except Exception as e:
         print(f"[ERREUR] Impossible de charger CLIP : {e}")
@@ -100,7 +100,7 @@ def init_models(device="cuda",
     # Pré-calcul des prototypes textuels (Outdoor vs Indoor vs Bad)
     # Cela évite de ré-encoder le texte à chaque image.
     device_t = model_clip.device
-    
+
     outdoor_txt = ["an outdoor scene", "garden", "backyard", "street view", "house exterior", "building facade"]
     indoor_txt  = ["an indoor scene", "living room", "bedroom", "kitchen", "bathroom", "empty room"]
     bad_txt     = ["a floor plan", "a blueprint", "a map", "text document", "plot plan", "technical drawing", "logo"]
@@ -137,9 +137,9 @@ def init_models(device="cuda",
 
         model_vis = AutoModel.from_pretrained(visual_id, **vis_args)
         model_vis.eval()
-        
+
         if device == "cpu": model_vis = model_vis.to("cpu")
-        
+
         model_vis, _ = try_compile_model(model_vis, "DINO")
     except Exception as e:
         print(f"[ERREUR] Impossible de charger DINO : {e}")
@@ -156,6 +156,7 @@ def _pil_from_bytes(b: bytes):
     """Convertit des bytes en PIL Image RGB."""
     return Image.open(BytesIO(b)).convert("RGB")
 
+
 def embed_images_in_batches(model, processor, pil_images, batch_size=16):
     """
     Génère les embeddings DINO pour une liste d'images.
@@ -169,10 +170,10 @@ def embed_images_in_batches(model, processor, pil_images, batch_size=16):
         batch = pil_images[i:i+batch_size]
         inputs = processor(images=batch, return_tensors="pt")
         inputs = {k: v.to(device) for k, v in inputs.items()}
-        
+
         with torch.no_grad():
             outputs = model(**inputs)
-        
+
         # Extraction du vecteur caractéristique (CLS token ou Mean Pooling)
         # DINOv2 : last_hidden_state[:, 0, :] est souvent le CLS token
         if hasattr(outputs, "last_hidden_state"):
@@ -183,10 +184,10 @@ def embed_images_in_batches(model, processor, pil_images, batch_size=16):
         else:
             # Fallback générique : moyenne
             feats = outputs[0].mean(dim=1)
-            
+
         feats = F.normalize(feats.float(), dim=-1)
         all_embs.append(feats.cpu().numpy())
-        
+
     if not all_embs:
         return np.zeros((0, 0))
         
@@ -194,7 +195,7 @@ def embed_images_in_batches(model, processor, pil_images, batch_size=16):
 
 
 # ==============================================================================
-# 4. LOGIQUE CŒUR : FILTRAGE CLIP
+# 4. FILTRAGE CLIP
 # ==============================================================================
 
 def filter_with_clip(clip_ctx, pil_imgs, batch_size=16):
@@ -221,30 +222,30 @@ def filter_with_clip(clip_ctx, pil_imgs, batch_size=16):
             sim_in  = (img_feats @ clip_ctx["emb_in"].T)
             sim_out = (img_feats @ clip_ctx["emb_out"].T)
             sim_bad = (img_feats @ clip_ctx["emb_bad"].T)
-            
+  
             # Max sur chaque catégorie
             max_in  = sim_in.max(dim=1).values
             max_out = sim_out.max(dim=1).values
             max_bad = sim_bad.max(dim=1).values
-            
+
             # Logique de décision vectorisée
             # On rejette si c'est "bad" (plan/logo)
             is_bad = (max_bad > clip_ctx["thresholds"]["bad"]) | (max_bad > torch.maximum(max_in, max_out))
-            
+
             keep_mask = ~is_bad
-            
+
             # Conversion CPU pour indexation
             keep_mask = keep_mask.cpu().numpy()
-            
+
             # Récupération des index globaux
             current_indices = np.arange(i, i + len(batch))
             kept_indices.extend(current_indices[keep_mask])
-            
+
     return kept_indices
 
 
 # ==============================================================================
-# 5. LOGIQUE CŒUR : CLUSTERING INTELLIGENT
+# 5. CLUSTERING INTELLIGENT
 # ==============================================================================
 
 def process_listing_smart_clustering(
@@ -253,7 +254,7 @@ def process_listing_smart_clustering(
     results_dir: str,
     models_context: tuple,
     device: str = "cuda",
-    similarity_threshold: float = 0.25, # <--- Paramètre SOTA
+    similarity_threshold: float = 0.25,
     min_images: int = 3,
     max_images: int = 15
 ) -> Dict:
@@ -303,13 +304,13 @@ def process_listing_smart_clustering(
     if not pil_kept:
         return {"listing_id": listing_id, "total": total_initial, "kept": 0, "selected": 0, "clusters": 0, "paths": ""}
 
-    # 3. Embedding DINO (Le cœur de la similarité)
+    # 3. Embedding DINO (Le coeur de la similarité)
     embs = embed_images_in_batches(model_vis, proc_vis, pil_kept, batch_size=16)
-    
+
     # 4. Clustering Agglomératif (Hierarchical)
     # Si on a 1 seule image, pas de clustering possible
     selected_indices_in_kept = []
-    
+
     if len(pil_kept) == 1:
         selected_indices_in_kept = [0]
         labels = [0]
@@ -345,24 +346,24 @@ def process_listing_smart_clustering(
     # Note : Le clustering a déjà réduit la redondance. 
     # Si on dépasse max_images, on doit choisir les clusters les plus pertinents.
     # DINO trie souvent implicitement par types. On coupe simplement ici pour l'instant.
-    
+
     if len(selected_indices_in_kept) > max_images:
         selected_indices_in_kept = selected_indices_in_kept[:max_images]
         
     # 6. Sauvegarde
     saved_paths = []
-    
+
     for i, idx in enumerate(selected_indices_in_kept):
         pil_img = pil_kept[idx]
         orig_path = path_kept[idx]
-        
+
         # On renomme proprement : c{cluster_id}_{nom_original}
         cluster_id = labels[idx] if len(pil_kept) > 1 else 0
         filename = f"c{cluster_id}_{os.path.basename(orig_path)}"
         dst_path = os.path.join(results_dir, filename)
-        
+
         try:
-            # Sauvegarde optimisée JPEG
+            # Sauvegarde JPEG
             pil_img.save(dst_path, format="JPEG", quality=95, optimize=True)
             saved_paths.append(filename)
         except Exception as e:

@@ -96,7 +96,7 @@ def process_image_batch(batch_tasks, size=518, pad_color=(0, 0, 0), quality=80):
                 with Image.open(BytesIO(response.content)) as im:
                     im_processed = resize_and_pad(im, size=size, pad_color=pad_color)
                     
-                    # SAUVEGARDE OPTIMISÉE
+                    # sauvegarde
                     im_processed.save(filepath, format='JPEG', quality=quality, optimize=True)
                     
                     stats['downloaded'] += 1
@@ -218,13 +218,13 @@ def main():
     parser.add_argument('-o', '--output', type=str, default='../../../data/images')
     parser.add_argument('-w', '--workers', type=int, default=max(1, multiprocessing.cpu_count()))
     
-    # MODIFICATION SOTA : 518 est le nombre magique pour DINOv2 (14*37)
+    # 518 car ca correspond aux dim pour DINOv2 (14*37) (max de tout les modèles)
     parser.add_argument('--size', type=int, default=518, help="Taille (DINOv2 préfère 518, Standard 224/384)")
     
-    # Qualité 80 suffit largement pour l'apprentissage, réduit la taille disque de 50% vs 95
+    # Qualité 80 suffit largement pour l'apprentissage, réduit la taille disque de 50%
     parser.add_argument('--quality', type=int, default=80, help="Qualité JPEG (1-100)")
     parser.add_argument('--pad-color', type=str, default="0,0,0", help="R,G,B")
-    
+
     args = parser.parse_args()
     args.pad_color = parse_pad_color(args.pad_color)
 

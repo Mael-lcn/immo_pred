@@ -97,7 +97,7 @@ class MaskedLogMSELoss(nn.Module):
 # 3. BOUCLE D'ENTRAÎNEMENT (Le modèle APPREND)
 # ==============================================================================
 def train_one_epoch(model, dataloader, optimizer, criterion, scaler, device, epoch, total_epochs, use_amp):
-    model.train() # <--- IMPORTANT : Active Dropout & BatchNorm
+    model.train()
 
     loop = tqdm(dataloader, desc=f"Ep {epoch}/{total_epochs} [TRAIN]")
     total_loss = 0
@@ -148,13 +148,13 @@ def train_one_epoch(model, dataloader, optimizer, criterion, scaler, device, epo
 # 4. BOUCLE DE VALIDATION (Le modèle est TESTÉ)
 # ==============================================================================
 def validate(model, dataloader, criterion, device, use_amp):
-    model.eval() # <--- IMPORTANT : Désactive Dropout, fige BatchNorm
+    model.eval()
     
     loop = tqdm(dataloader, desc="[VAL]")
     total_loss = 0
     count = 0
 
-    with torch.no_grad(): # <--- IMPORTANT : Coupe l'enregistrement des gradients
+    with torch.no_grad():
         for batch in loop:
             imgs = batch['images'].to(device, non_blocking=True)
             img_masks = batch['image_masks'].to(device, non_blocking=True)

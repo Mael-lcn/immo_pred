@@ -40,7 +40,6 @@ def read_listing_images_for_listing(task):
     valid_exts = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff'}
 
     try:
-        # os.scandir est beaucoup plus rapide que os.walk ou glob pour des dossiers plats
         with os.scandir(images_dir) as entries:
             for entry in entries:
                 if entry.is_file():
@@ -65,12 +64,10 @@ def read_listing_images_for_listing(task):
 # ORCHESTRATEUR : Gestion du Pipeline
 # -----------------------------------------------------------------------------
 def process_all(csv_root, images_root, results_root, args):
-    
     # 1. Recherche des CSV (Achat et Location)
     csv_root_path = Path(csv_root)
     csv_files = sorted(list(csv_root_path.glob("**/achat/*.csv")) + 
-                       list(csv_root_path.glob("**/location/*.csv")) +
-                       list(csv_root_path.glob("*.csv"))) # Sécurité si à la racine
+                       list(csv_root_path.glob("**/location/*.csv")))
 
     if not csv_files:
         print(f"[WARN] Aucun fichier CSV trouvé dans {csv_root}")
@@ -103,10 +100,9 @@ def process_all(csv_root, images_root, results_root, args):
     # -------------------------------------------------------------------------
     # On limite le nombre de workers I/O. Trop de workers saturent la RAM 
     # car ils envoient tous des images binaires au processus principal.
-    # 8 est un bon compromis sur une machine moderne.
     n_workers = min(args.num_workers, 8)
     print(f"--- [CPU] Démarrage du Pool I/O avec {n_workers} workers ---")
-    
+
     pool = Pool(processes=n_workers)
 
     try:
@@ -130,7 +126,7 @@ def process_all(csv_root, images_root, results_root, args):
                         
                         # Dossier destination
                         out_dir = root_out / lid
-                        
+
                         # SKIP INTELLIGENT : Si le dossier de sortie existe et n'est pas vide
                         if out_dir.exists() and any(out_dir.iterdir()):
                             continue
@@ -150,7 +146,6 @@ def process_all(csv_root, images_root, results_root, args):
 
             # Lancement du Pipeline : 
             # Workers lisent le disque -> Main Process fait l'IA
-            # imap_unordered est plus fluide pour la barre de progression
             iterator = pool.imap_unordered(read_listing_images_for_listing, tasks, chunksize=4)
             
             report_rows = []
@@ -159,7 +154,7 @@ def process_all(csv_root, images_root, results_root, args):
                 # Si le worker n'a rien trouvé (dossier vide ou inexistant)
                 if not images_bytes:
                     continue
-                
+
                 meta = listing_meta.get(listing_id)
                 if not meta: continue
 

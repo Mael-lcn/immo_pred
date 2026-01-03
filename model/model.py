@@ -9,7 +9,6 @@ from transformers import AutoModel
 # ==============================================================================
 # BLOCS DE BASE
 # ==============================================================================
-
 class PeriodicEmbedding(nn.Module):
     def __init__(self, embed_dim, sigma=0.1):
         super().__init__()
@@ -167,7 +166,7 @@ class SOTARealEstateModel(nn.Module):
             nn.Linear(fusion_dim//2, 1)
         )
 
-        # --- 6. Freezing (Optionnel mais recommandé pour V1) ---
+        # --- 6. Freezing ---
         if freeze_encoders:
             for p in self.img_encoder.parameters(): p.requires_grad = False
             for p in self.text_encoder.parameters(): p.requires_grad = False
@@ -212,7 +211,7 @@ class SOTARealEstateModel(nn.Module):
         # --- B. Texte ---
         with torch.set_grad_enabled(not self.text_encoder.parameters().__next__().requires_grad):
             txt_out = self.text_encoder(input_ids, attention_mask=text_mask)
-        
+    
         # On prend le CLS token du texte (index 0)
         tokens_txt = self.text_proj(txt_out.last_hidden_state[:, 0, :]).unsqueeze(1) # (B, 1, fusion_dim)
 
@@ -223,10 +222,10 @@ class SOTARealEstateModel(nn.Module):
         # PyTorch attention mask: True = IGNORER, False = GARDER
         # image_masks: 1=Garder, 0=Ignorer
         img_padding_mask = (image_masks == 0).to(device) # True là où c'est du padding
-        
+
         # Le texte (résumé) est toujours présent et pertinent, pas de masque d'exclusion
         txt_padding_mask = torch.zeros((B, 1), dtype=torch.bool, device=device)
-        
+
         # Masque combiné (B, N+1)
         full_padding_mask = torch.cat([img_padding_mask, txt_padding_mask], dim=1)
 
@@ -248,11 +247,9 @@ class SOTARealEstateModel(nn.Module):
         # On récupère le CLS token tabulaire (le dernier, ajouté par le tokenizer)
         # C'est lui qui a agrégé toute l'info tabulaire + contexte visuel/textuel
         final_vec = tokens_tab[:, -1, :] 
-        
+
         # --- G. Sortie ---
         # IMPORTANT : On renvoie TOUJOURS le Log-Price.
-        # La conversion en exp() doit se faire hors du modèle pour l'affichage,
-        # mais la Loss function doit travailler sur ces logs.
         log_vente = self.head_price(final_vec)
         log_loc = self.head_rent(final_vec)
 

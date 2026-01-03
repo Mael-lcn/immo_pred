@@ -93,7 +93,7 @@ def main():
     # On calcule toutes les composantes possibles (max 512)
     pca = PCA()
     pca.fit(X_emb)
-    
+
     cumsum = np.cumsum(pca.explained_variance_ratio_)
     
     # 5. RÉSULTATS CLÉS

@@ -25,7 +25,7 @@ def get_cols_config():
     text_cols = ['titre', 'description']
     base_cat = ['property_type', 'orientation', 'dataset_source']
     cat_cols = base_cat + BINARY_COLS
-    
+
     # Variables purement continues
     cont_cols = [
         'latitude', 'longitude', 
@@ -62,7 +62,7 @@ def prepare_preprocessors(csv_path_or_df, cont_cols, cat_cols):
 
     # --- 1. Gestion Variables Continues (Médiane + Log + Scaler) ---
     medians = {}
-    
+
     # Conversion préventive en numérique
     for c in cont_cols:
         full_df[c] = pd.to_numeric(full_df[c], errors='coerce')
@@ -71,7 +71,7 @@ def prepare_preprocessors(csv_path_or_df, cont_cols, cat_cols):
         med = full_df[c].median()
         if pd.isna(med): med = 0.0 # Fallback si colonne vide
         medians[c] = med
-        
+    
         # Remplissage des NaNs
         full_df[c] = full_df[c].fillna(med)
 
@@ -91,11 +91,11 @@ def prepare_preprocessors(csv_path_or_df, cont_cols, cat_cols):
     for c in cat_cols:
         # Conversion string pour homogénéiser
         s_col = full_df[c].astype(str)
-        
+    
         # Nettoyage spécifique pour Binaires/Source ("1.0" -> "1")
         if c in BINARY_COLS or c == 'dataset_source':
              s_col = s_col.apply(lambda x: str(int(float(x))) if x.replace('.','',1).isdigit() else "NaN")
-        
+    
         # Calcul du MODE (Valeur la plus fréquente)
         # On exclut "nan", "NaN", "MISSING" du calcul du mode si possible
         valid_vals = s_col[~s_col.isin(["nan", "NaN", "MISSING", "None"])]
@@ -132,7 +132,7 @@ class RealEstateDataset(Dataset):
         self.tokenizer = tokenizer
         self.scaler = scaler
         self.medians = medians
-        self.modes = modes # Nouveau: dictionnaire des modes
+        self.modes = modes # Dictionnaire des modes
         self.cat_mappings = cat_mappings
         self.cont_cols = cont_cols
         self.cat_cols = cat_cols
@@ -160,8 +160,10 @@ class RealEstateDataset(Dataset):
         self.df = self.df.dropna(subset=['price'])
         self.df['dataset_source'] = pd.to_numeric(self.df['dataset_source'], errors='coerce').fillna(0).astype(int)
 
+
     def __len__(self):
         return len(self.df)
+
 
     def load_images(self, property_id):
         folder_path = os.path.join(self.img_dir, str(property_id))
@@ -170,20 +172,21 @@ class RealEstateDataset(Dataset):
             # Filtrage des extensions valides uniquement
             valid_exts = {'.jpg', '.jpeg', '.png', '.bmp', '.webp'}
             files = sorted([f for f in os.listdir(folder_path) if os.path.splitext(f)[1].lower() in valid_exts])[:10]
-            
+
             for f in files:
                 try:
                     with Image.open(os.path.join(folder_path, f)).convert('RGB') as img:
                         images.append(self.transform(img))
                 except: continue
-        
+
         if not images:
             # Placeholder: Image noire (C, H, W)
             # IMPORTANT : On renvoie False pour dire "C'est du fake"
             images.append(torch.zeros(3, 224, 224))
             return torch.stack(images), False 
-        
+
         return torch.stack(images), True
+
 
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
@@ -202,7 +205,7 @@ class RealEstateDataset(Dataset):
         vals = []
         for c in self.cont_cols:
             raw_val = pd.to_numeric(row.get(c, np.nan), errors='coerce')
-            
+
             # IMPUTATION PAR LA MÉDIANE
             if pd.isna(raw_val): 
                 raw_val = self.medians.get(c, 0.0)
@@ -218,7 +221,7 @@ class RealEstateDataset(Dataset):
         cat_idxs = []
         for c in self.cat_cols:
             val_raw = str(row.get(c, "nan"))
-            
+    
             # Nettoyage Binaire/Source
             if c in self.binary_cols or c == 'dataset_source':
                 try: 
@@ -242,11 +245,11 @@ class RealEstateDataset(Dataset):
         source = int(row.get('dataset_source', 0))
         # Log du prix pour stabiliser la regression
         log_price = np.log1p(float(row['price']))
-        
+
         # Vecteur cible [Vente, Location]
         target_vec = torch.zeros(2)
         mask_vec = torch.zeros(2) # 1 si la target existe, 0 sinon
-        
+
         if source == 0: # Vente
             target_vec[0] = log_price
             mask_vec[0] = 1.0 
@@ -268,6 +271,7 @@ class RealEstateDataset(Dataset):
             'masks': mask_vec
         }
 
+
 def real_estate_collate_fn(batch):
     """
     Gère le padding dynamique des images dans le batch.
@@ -278,7 +282,7 @@ def real_estate_collate_fn(batch):
 
     # Tenseur global d'images (B, Max_N, 3, H, W)
     padded_images = torch.zeros(batch_size, max_imgs, 3, 224, 224)
-    
+
     # Masque d'attention Image : 1 = Vrai pixel, 0 = Padding/Fake
     # Le modèle fera (image_masks == 0) -> True pour ignorer
     image_attn_mask = torch.zeros(batch_size, max_imgs)
@@ -300,9 +304,9 @@ def real_estate_collate_fn(batch):
         'images': padded_images,
         'image_masks': image_attn_mask,
         'input_ids': torch.stack([x['input_ids'] for x in batch]),
-        'text_mask': torch.stack([x['attention_mask'] for x in batch]), # Renommé pour correspondre à model.py
-        'x_cont': torch.stack([x['tab_cont'] for x in batch]),          # Renommé pour model.py
-        'x_cat': torch.stack([x['tab_cat'] for x in batch]),            # Renommé pour model.py
+        'text_mask': torch.stack([x['attention_mask'] for x in batch]),
+        'x_cont': torch.stack([x['tab_cont'] for x in batch]),
+        'x_cat': torch.stack([x['tab_cat'] for x in batch]),
         'targets': torch.stack([x['targets'] for x in batch]),
         'masks': torch.stack([x['masks'] for x in batch])
     }
