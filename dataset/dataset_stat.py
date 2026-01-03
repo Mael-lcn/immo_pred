@@ -16,14 +16,29 @@ plt.rcParams['figure.figsize'] = (12, 8)
 plt.rcParams['font.family'] = 'sans-serif'
 
 
+# --- GESTION DES CLÉS (FR -> EN) ---
+# Basé sur le dictionnaire fourni : on testera d'abord la clé FR,
+# puis la clé EN correspondante. Si aucune n'existe, on laisse planter.
+def choose_col_name(df, fr_key, en_key):
+    """
+    Retourne le nom de colonne existant dans df : on teste la clé FR puis EN.
+    Si aucune n'existe, lève KeyError (on laisse planter comme demandé).
+    """
+    if fr_key in df.columns:
+        return fr_key
+    if en_key in df.columns:
+        return en_key
+    raise KeyError(f"Aucune des clés attendues trouvée : '{fr_key}' ou '{en_key}'.")
+
+
 def count_images_recursively(root_dir):
     """
     Parcourt récursivement les dossiers.
     Compte TOUS les fichiers trouvés (supposés être des images).
     """
-    if not os.path.exists(root_dir): 
+    if not os.path.exists(root_dir):
         return 0
-    
+
     count = 0
     # os.walk est très efficace pour parcourir une arborescence complexe
     for root, dirs, files in os.walk(root_dir):
@@ -41,7 +56,7 @@ def get_chunk_stats(file_list):
             # low_memory=False pour éviter les Warnings sur les types mixtes
             dfs.append(pd.read_csv(csv_path, sep=";", quotechar='"', low_memory=False))
         except Exception:
-            pass 
+            pass
 
     if not dfs: return None
     df_chunk = pd.concat(dfs, ignore_index=True)
@@ -50,24 +65,37 @@ def get_chunk_stats(file_list):
     total_rows = len(df_chunk)
     nan_counts = df_chunk.isna().sum()
 
+    # --- GESTION DES CLÉS : on tente FR puis EN (si aucune -> plantage) ---
+    # Remarques : les noms anglais sont pris depuis le dictionnaire fourni.
+    # type_bien -> 'type_bien' (FR) or 'property_type' (EN)
+    type_bien_col = choose_col_name(df_chunk, 'type_bien', 'property_type')
+    # type_vente -> 'type_vente' (FR) or 'dataset_source' (EN) selon le dict fourni
+    type_vente_col = choose_col_name(df_chunk, 'type_vente', 'dataset_source')
+
     # 2. Compte par Type de Bien (Maison, Appartement, etc.)
-    property_type_counts = df_chunk['type_bien'].value_counts()
-    grouped_nan_counts = df_chunk.isna().groupby(df_chunk['type_bien']).sum()
+    property_type_counts = df_chunk[type_bien_col].value_counts()
+    grouped_nan_counts = df_chunk.isna().groupby(df_chunk[type_bien_col]).sum()
 
     # 3. Compte par Type de Vente (Achat/Location)
-    type_vente_counts = df_chunk['type_vente'].value_counts()
+    type_vente_counts = df_chunk[type_vente_col].value_counts()
 
     # 4. Stats Numériques (Prix, Surface, Pièces)
+    # On suit le dictionnaire : on teste la clé FR puis EN ; si aucune existe -> plantage.
     numeric_stats = {}
-    cols_to_check = ['price', 'surface_area', 'rooms']
-    for col in cols_to_check:
-        if col in df_chunk.columns:
-            s = pd.to_numeric(df_chunk[col], errors='coerce')
-            numeric_stats[col] = {
-                'min': s.min(), 'max': s.max(), 'sum': s.sum(), 'count': s.count()
-            }
-        else:
-            numeric_stats[col] = None
+    numeric_mappings = [
+        ('prix', 'price'),  # prix -> price
+        ('surface_habitable', 'living_area_sqm'),  # surface_habitable -> living_area_sqm
+        ('nb_pieces', 'num_rooms'),  # nb_pieces -> num_rooms
+    ]
+    # On utilise une clé logique pour l'affichage/stockage (on prend la clé EN finale si présente sinon FR)
+    for fr_col, en_col in numeric_mappings:
+        col_name = choose_col_name(df_chunk, fr_col, en_col)  # va lever KeyError si aucune des 2 existe
+        # standardiser la clé de stockage : utiliser le nom trouvé (EN si présent sinon FR)
+        key = en_col if en_col in df_chunk.columns else fr_col
+        s = pd.to_numeric(df_chunk[col_name], errors='coerce')
+        numeric_stats[key] = {
+            'min': s.min(), 'max': s.max(), 'sum': s.sum(), 'count': s.count()
+        }
 
     return {
         'total_rows': total_rows,
@@ -110,16 +138,16 @@ def merge_stats(stat_a, stat_b):
 def generate_plots(df_density, type_counts, out_dir):
     """Génère les graphiques pour le rapport"""
     print("   [INFO] Génération des graphiques...")
-    
+
     # 1. Barplot manquants
     plt.figure(figsize=(12, 10))
     missing_data = df_density[df_density['pct_missing'] > 0].sort_values('pct_missing', ascending=True)
-    
+
     if not missing_data.empty:
         chart = sns.barplot(
             data=missing_data,
-            x='pct_missing', 
-            y=missing_data.index, 
+            x='pct_missing',
+            y=missing_data.index,
             palette='viridis',
             hue=missing_data.index,
             legend=False
@@ -137,14 +165,14 @@ def generate_plots(df_density, type_counts, out_dir):
     others = type_counts.sum() - top_types.sum()
     if others > 0:
         top_types['Autres'] = others
-    
-    plt.pie(top_types, labels=top_types.index, autopct='%1.1f%%', startangle=140, 
+
+    plt.pie(top_types, labels=top_types.index, autopct='%1.1f%%', startangle=140,
             colors=sns.color_palette('pastel'), pctdistance=0.85, explode=[0.05] + [0]* (len(top_types)-1))
-    
+
     centre_circle = plt.Circle((0,0),0.70,fc='white')
     fig = plt.gcf()
     fig.gca().add_artist(centre_circle)
-    
+
     plt.title('Répartition des Types de Biens', fontsize=15, weight='bold')
     plt.tight_layout()
     plt.savefig(os.path.join(out_dir, 'plot_property_types.png'), dpi=300)
@@ -152,10 +180,10 @@ def generate_plots(df_density, type_counts, out_dir):
 
 def run(args):
     t0 = time.monotonic()
-    
+
     # Récupération de tous les fichiers
     files = glob.glob(os.path.join(args.acaht_csv, '*.csv')) + glob.glob(os.path.join(args.loc_csv, '*.csv'))
-    
+
     if not files:
         print("[ERR] Aucun fichier CSV trouvé.")
         return
@@ -168,27 +196,27 @@ def run(args):
         results = pool.map(get_chunk_stats, chunks)
 
     final = reduce(merge_stats, results)
-    
+
     if not final:
         print("[ERR] Échec du traitement.")
         return
 
     total_rows = final['total_rows']
-    
+
     # --- EXTRACTION DES COMPTEURS SPÉCIFIQUES ---
-    
+
     # 1. Location (1) vs Achat (0)
     tv_counts = final['type_vente_counts']
     nb_achat = tv_counts.get(0, 0) # Mapping: 0 = Achat
     nb_loc = tv_counts.get(1, 0)   # Mapping: 1 = Location
-    
+
     # 2. Maison vs Appartement
     pt_counts = final['property_type_counts']
     # On cherche les clés 'Maison' et 'Appartement' (sensible à la casse dans le CSV)
     # On utilise .get() pour éviter un crash si le type n'existe pas
     nb_maison = pt_counts.get('Maison', 0)
     nb_appart = pt_counts.get('Appartement', 0)
-    
+
     # Si les clés sont en minuscules dans ton CSV, on peut tenter une somme plus robuste :
     # nb_maison = pt_counts[pt_counts.index.str.lower() == 'maison'].sum()
 
@@ -218,9 +246,9 @@ def run(args):
     # --- SAUVEGARDE & PLOTS ---
     out_dir = args.output
     os.makedirs(out_dir, exist_ok=True)
-    
+
     df_density.to_csv(os.path.join(out_dir, 'stats_missing_pct.csv'), sep=';', float_format='%.2f')
-    
+
     try:
         generate_plots(df_density, pt_counts, out_dir)
         print(f"\n[OK] Graphiques sauvegardés dans : {out_dir}")
@@ -244,7 +272,7 @@ def main():
     parser.add_argument('-a', '--acaht_csv', type=str, default='../../data/achat/')
     parser.add_argument('-l', '--loc_csv', type=str, default='../../data/location/')
     parser.add_argument('-img', '--img_dir', type=str, default=None)
-    parser.add_argument('-o', '--output', type=str, default='../../output/')
+    parser.add_argument('-o', '--output', type=str, default='../output/')
     parser.add_argument('-w', '--workers', type=int, default=max(1, cpu_count()-1))
     args = parser.parse_args()
     run(args)
