@@ -34,8 +34,8 @@ def plot_correlation_circle(pca, components, feature_names,axe_x=0, axe_y=1):
                   linewidth=1, color='blue')
         plt.text(x * 1.1, y * 1.1, feature_names[i], fontsize=10)
 
-    plt.xlabel("Axe 1")
-    plt.ylabel("Axe 2")
+    plt.xlabel(f"Axe {axe_x}")
+    plt.ylabel(f"Axe {axe_y}")
     plt.title("Cercle des corrélations (PCA)")
     plt.grid(True)
     plt.xlim(-1.1, 1.1)

@@ -48,6 +48,9 @@ def stats_univariees(df,low=0.01,high=0.99): # Les stats varient en fonction de 
 
     num_cols,cat_cols = get_variable_types(df)
     df_clean = clean_outliers(df, num_cols, low=low, high=high)
+    print("*******")
+    print(df_clean["price"].describe())
+    print("*******")
 
     desc_num = df_clean[num_cols].describe().T
     desc_num["skew"] = df_clean[num_cols].skew() # on regarde l'asymétrie
@@ -195,7 +198,17 @@ def plot_multilabel_counts(df, col, sep, top=20):
     plt.savefig(f"plots/univ_multilabel_{col}.png")
     plt.close()
 
-
+def afficher_repartition_biens(df):
+    print("\n=== Répartition Appartements vs Maisons ===")
+    
+    # Compte les valeurs (ex: 22000 Maisons, 18000 Apparts)
+    comptes = df["property_type"].value_counts()
+    print(comptes)
+    
+    print("\n--- En Pourcentage ---")
+    # Affiche en % (ex: 0.55 pour 55%)
+    pourcentages = df["property_type"].value_counts(normalize=True) * 100
+    print(pourcentages)
 
 
 def main():
@@ -223,14 +236,17 @@ def main():
 
     args = parser.parse_args()  
     df = load_all_regions(args.path)
+
+    print(df["price"].describe())
     detect_outliers_iqr(df)
-    stats_univariees(df)
+    #stats_univariees(df)
     
  #   affiche_caracteristique_par_defaut(df)
   #  check_data_quality(df)
-   # showCatPlots(df)
+    #showCatPlots(df)
     #showBoxPlots(df)   
-    #showHistoPlots(df)
+    #howHistoPlots(df)
+    #afficher_repartition_biens(df)
 
 
      

@@ -32,6 +32,8 @@ def get_variable_types(dataframe: pd.DataFrame):
     return num_cols, cat_cols
 
 
+"""
+ancienne version qui ne supprimait pas les utiliers mais les ecraisait aux bornes
 
 def clean_outliers(df, cols, low=0.01, high=0.99):
     df_clean = df.copy()
@@ -41,8 +43,17 @@ def clean_outliers(df, cols, low=0.01, high=0.99):
         df_clean[c] = df[c].clip(q_low, q_high)
     return df_clean
 
-
-
+"""
+def clean_outliers(df, cols, low=0.01, high=0.99):
+    df_clean = df.copy()
+    for c in cols:
+        q_low = df_clean[c].quantile(low)
+        q_high = df_clean[c].quantile(high)
+        
+        # On ne garde que les lignes comprises entre les deux bornes
+        df_clean = df_clean[(df_clean[c] >= q_low) & (df_clean[c] <= q_high)]
+        
+    return df_clean
 
 
 def explode_multilabel_column(df, col, sep=','):
@@ -115,13 +126,17 @@ def load_all_regions(folder_path):
             continue
 
     df = pd.concat(df_list, ignore_index=True)
+    print("**********")
+    print(df.shape)
+    print("**********")
+
     """"""
     # Vérifie les IDs identiques
+    """
     inspect_duplicates(df, subset=['id'])
     if "id" in df.columns:
         df = df.drop_duplicates(subset=["id"], keep="first")
-    else:
-        df = df.drop_duplicates(keep="first")
+"""
     print(f"\nDataset fusionné : {df.shape[0]} lignes, {df.shape[1]} colonnes")
     return df
 
