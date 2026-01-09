@@ -176,7 +176,6 @@ def main():
     global_ext, global_feat, global_region = set(), set(), set()
     
     with multiprocessing.Pool(args.workers) as pool:
-        # imap_unordered est plus rapide
         for ext_s, feat_s, reg_s in tqdm(pool.imap_unordered(scan_worker, files), total=len(files), desc="1/2 Scan Vocabulaire"):
             global_ext.update(ext_s)
             global_feat.update(feat_s)

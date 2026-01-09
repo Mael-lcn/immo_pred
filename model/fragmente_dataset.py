@@ -51,7 +51,7 @@ def split_and_chunk(args):
         print("[ERREUR] Aucun fichier trouvé.")
         return
 
-    # 2. Mélange indépendant (Shuffle)
+    # 2. Mélange indépendant
     # On mélange chaque groupe pour casser l'ordre temporel des fichiers
     if not df_achat.empty:
         df_achat = df_achat.sample(frac=1, random_state=SEED).reset_index(drop=True)

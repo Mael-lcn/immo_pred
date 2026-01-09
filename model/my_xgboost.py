@@ -137,7 +137,7 @@ def evaluate_and_save(model, X_test, y_test_log, feature_names, label, output_di
     plt.close() # Libère la mémoire
     print(f"   > Dashboard PNG sauvegardé.")
 
-    # --- 5. SHAP (Lourd mais utile) ---
+    # --- 5. SHAP ---
     print(f"   > Calcul SHAP en cours...")
     try:
         # Sampling pour rapidité

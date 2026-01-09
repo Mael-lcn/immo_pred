@@ -182,16 +182,14 @@ def filtre(df):
     # --- ÉTAPE 4 : SPLIT & LOGIQUE CONDITIONNELLE ---
     mask_appart = df['property_type'] == 'Appartement'
     mask_maison = df['property_type'] == 'Maison'
-    
+
     df_appart = df[mask_appart].copy()
     df_maison = df[mask_maison].copy()
 
     # Maison : Terrain obligatoire
-    if "total_land_area_sqm" in df_maison.columns:
-        df_maison = df_maison.dropna(subset=["total_land_area_sqm"])
+    df_maison = df_maison.dropna(subset=["total_land_area_sqm"])
     # Appart : Terrain = 0
-    if "total_land_area_sqm" in df_appart.columns:
-        df_appart["total_land_area_sqm"] = df_appart["total_land_area_sqm"].fillna(0)
+    df_appart["total_land_area_sqm"] = df_appart["total_land_area_sqm"].fillna(0)
 
     # --- ÉTAPE 5 : RÈGLES DE VALEURS ---
     df_appart = apply_rules(df_appart, RULES_COMMON)
