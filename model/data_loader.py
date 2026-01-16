@@ -71,13 +71,15 @@ def prepare_preprocessors(csv_path_or_df, cont_cols, cat_cols):
         med = full_df[c].median()
         if pd.isna(med): med = 0.0 # Fallback si colonne vide
         medians[c] = med
-    
+
         # Remplissage des NaNs
         full_df[c] = full_df[c].fillna(med)
 
-        # Log Transform pour les surfaces (Lissage des distributions exponentielles)
+        """
+        # Log Transform pour les surfaces (Lissage des distributions exponentielles) add long et lat ou rien faire
         if 'area' in c:
             full_df[c] = np.log1p(full_df[c])
+        """
 
     # Fit du Scaler Robuste
     scaler = RobustScaler()
@@ -91,31 +93,31 @@ def prepare_preprocessors(csv_path_or_df, cont_cols, cat_cols):
     for c in cat_cols:
         # Conversion string pour homogénéiser
         s_col = full_df[c].astype(str)
-    
+
         # Nettoyage spécifique pour Binaires/Source ("1.0" -> "1")
         if c in BINARY_COLS or c == 'dataset_source':
              s_col = s_col.apply(lambda x: str(int(float(x))) if x.replace('.','',1).isdigit() else "NaN")
-    
+
         # Calcul du MODE (Valeur la plus fréquente)
-        # On exclut "nan", "NaN", "MISSING" du calcul du mode si possible
+        # On exclut "nan", "NaN", "MISSING" du calcul du mode
         valid_vals = s_col[~s_col.isin(["nan", "NaN", "MISSING", "None"])]
         if len(valid_vals) > 0:
             mode_val = valid_vals.mode()[0]
         else:
             mode_val = "0" if c in BINARY_COLS else "MISSING" # Fallback
-        
+
         modes[c] = mode_val
-        
+
         # On remplit les NaNs dans le DF de calibration pour construire le vocabulaire propre
         s_col = s_col.replace(["nan", "NaN", "MISSING", "None"], mode_val)
 
-        # Création du vocabulaire
+        # Création du vocabulaire de type mot1: 1
         uniques = sorted(s_col.unique())
         mapping = {val: i for i, val in enumerate(uniques)}
-        
+
         # Token <UNK> pour les valeurs jamais vues
         mapping["<UNK>"] = len(uniques)
-        
+
         cat_mappings[c] = mapping
         cat_dims.append(len(mapping) + 1) # +1 pour <UNK>
 
@@ -154,7 +156,7 @@ class RealEstateDataset(Dataset):
                 try: data.append(pd.read_csv(os.path.join(df_or_folder, f), sep=None, engine='python'))
                 except: pass
             self.df = pd.concat(data, ignore_index=True)
-        
+
         # Nettoyage Targets
         self.df['price'] = pd.to_numeric(self.df['price'], errors='coerce')
         self.df = self.df.dropna(subset=['price'])
@@ -209,10 +211,11 @@ class RealEstateDataset(Dataset):
             # IMPUTATION PAR LA MÉDIANE
             if pd.isna(raw_val): 
                 raw_val = self.medians.get(c, 0.0)
-
-            # Log1p pour surface
+            """
+            # Log1p pour surface mettre lat et long ou laisse commenté
             if 'area' in c: raw_val = np.log1p(max(0, raw_val))
             vals.append(raw_val)
+            """
 
         # Transformation via le Scaler ajusté précédemment
         scaled_cont = self.scaler.transform(np.array(vals).reshape(1, -1)).flatten()
@@ -221,7 +224,7 @@ class RealEstateDataset(Dataset):
         cat_idxs = []
         for c in self.cat_cols:
             val_raw = str(row.get(c, "nan"))
-    
+
             # Nettoyage Binaire/Source
             if c in self.binary_cols or c == 'dataset_source':
                 try: 
@@ -262,7 +265,7 @@ class RealEstateDataset(Dataset):
 
         return {
             'images': imgs_tensor,         # (N, 3, 224, 224)
-            'has_real_imgs': has_real_imgs,# Bool
+            'has_real_imgs': has_real_imgs, # Bool
             'input_ids': tokens['input_ids'].squeeze(0),
             'attention_mask': tokens['attention_mask'].squeeze(0), # Masque texte
             'tab_cont': torch.tensor(scaled_cont, dtype=torch.float32),

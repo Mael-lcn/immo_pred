@@ -91,7 +91,6 @@ RULES_APPART = {
     "num_bedrooms": (0, 15),
     "living_area_sqm": (9, 600),
     "total_land_area_sqm": (0, 1000), 
-    "building_num_floors": (0, 50)
 }
 
 RULES_MAISON = {
@@ -99,7 +98,6 @@ RULES_MAISON = {
     "num_bedrooms": (1, 30),
     "living_area_sqm": (20, 2000),
     "total_land_area_sqm": (1, 1000000),
-    "building_num_floors": (0, 5)
 }
 
 

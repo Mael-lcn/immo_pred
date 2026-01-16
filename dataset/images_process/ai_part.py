@@ -206,23 +206,23 @@ def filter_with_clip(clip_ctx, pil_imgs, batch_size=16):
     model = clip_ctx["model"]
     proc = clip_ctx["processor"]
     device = clip_ctx["device"]
-    
+
     kept_indices = []
-    
+
     for i in range(0, len(pil_imgs), batch_size):
         batch = pil_imgs[i:i+batch_size]
         # Preprocessing CLIP
         inputs = proc(images=batch, return_tensors="pt", padding=True).to(device)
-        
+
         with torch.no_grad():
             img_feats = model.get_image_features(**inputs)
             img_feats = F.normalize(img_feats.float(), dim=-1)
-            
+
             # Similarité Cosine
             sim_in  = (img_feats @ clip_ctx["emb_in"].T)
             sim_out = (img_feats @ clip_ctx["emb_out"].T)
             sim_bad = (img_feats @ clip_ctx["emb_bad"].T)
-  
+
             # Max sur chaque catégorie
             max_in  = sim_in.max(dim=1).values
             max_out = sim_out.max(dim=1).values

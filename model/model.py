@@ -35,7 +35,7 @@ class GEGLU(nn.Module):
 class SOTAFeatureTokenizer(nn.Module):
     def __init__(self, num_cont, cat_cardinalities, embed_dim):
         super().__init__()
-        
+
         # 1. Embeddings continus (Neural : Périodique -> Linear)
         self.cont_embeddings = nn.ModuleList([
             nn.Sequential(
@@ -43,37 +43,37 @@ class SOTAFeatureTokenizer(nn.Module):
                 nn.Linear(embed_dim, embed_dim)
             ) for _ in range(num_cont)
         ])
-        
+
         # 2. Embeddings catégoriels (Lookup Table)
         self.cat_embeddings = nn.ModuleList([
             nn.Embedding(card, embed_dim) for card in cat_cardinalities
         ])
-        
+
         # 3. Token CLS (Learnable) qui servira à l'agrégation finale
         self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim))
 
 
     def forward(self, x_cont, x_cat):
         tokens = []
-        
+
         # Traitement Continus
         for i, layer in enumerate(self.cont_embeddings):
             # x_cont[:, i] est (Batch,), on veut (Batch, 1) pour le passer au layer
             val = x_cont[:, i].unsqueeze(1)
             # Sortie layer (Batch, Dim) -> Unsqueeze -> (Batch, 1, Dim)
             tokens.append(layer(val).unsqueeze(1))
-            
+
         # Traitement Catégories
         if x_cat is not None:
             for i, layer in enumerate(self.cat_embeddings):
                 # x_cat[:, i] est (Batch,) d'indices long
                 tokens.append(layer(x_cat[:, i]).unsqueeze(1))
-        
+
         # Ajout du CLS Token à la fin
         # Expand pour matcher le batch size : (Batch, 1, Dim)
         cls_tokens = self.cls_token.expand(x_cont.shape[0], -1, -1)
         tokens.append(cls_tokens)
-        
+
         # Concaténation sur la dimension sequence (dim=1)
         return torch.cat(tokens, dim=1)
 
@@ -85,11 +85,11 @@ class CrossModalInteraction(nn.Module):
     def __init__(self, dim, num_heads=8, dropout=0.1):
         super().__init__()
         self.multihead_attn = nn.MultiheadAttention(dim, num_heads, dropout=dropout, batch_first=True)
-        
+
         self.norm_q = nn.LayerNorm(dim)
         self.norm_kv = nn.LayerNorm(dim)
         self.norm_out = nn.LayerNorm(dim)
-        
+
         self.ff = nn.Sequential(
             nn.Linear(dim, dim * 8), 
             GEGLU(), 
@@ -166,7 +166,7 @@ class SOTARealEstateModel(nn.Module):
             nn.Linear(fusion_dim//2, 1)
         )
 
-        # --- 6. Freezing ---
+        # --- 6. Freezing de la Blackbone---
         if freeze_encoders:
             for p in self.img_encoder.parameters(): p.requires_grad = False
             for p in self.text_encoder.parameters(): p.requires_grad = False
@@ -200,18 +200,18 @@ class SOTARealEstateModel(nn.Module):
         # --- A. Vision ---
         # On aplatit Batch et N_Img pour passer dans l'encodeur 2D standard
         flat_imgs = images.view(B * N, C, H, W)
-        
+
         # Extraction features (si freeze=True, utiliser no_grad économise de la VRAM)
         with torch.set_grad_enabled(not self.img_encoder.parameters().__next__().requires_grad):
             img_feats = self.img_encoder(flat_imgs) # (B*N, img_dim)
-        
+
         # Projection et Reshape
         tokens_img = self.img_proj(img_feats).view(B, N, -1) # (B, N, fusion_dim)
 
         # --- B. Texte ---
         with torch.set_grad_enabled(not self.text_encoder.parameters().__next__().requires_grad):
             txt_out = self.text_encoder(input_ids, attention_mask=text_mask)
-    
+
         # On prend le CLS token du texte (index 0)
         tokens_txt = self.text_proj(txt_out.last_hidden_state[:, 0, :]).unsqueeze(1) # (B, 1, fusion_dim)
 

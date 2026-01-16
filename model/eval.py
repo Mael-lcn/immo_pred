@@ -120,28 +120,28 @@ def run_eval_and_explain(model, dataloader, device, tokenizer, output_dir, featu
     print(f"[INFO] Analyse approfondie en cours...")
 
     for batch_idx, batch in enumerate(tqdm(dataloader, desc="Audit Modèle")):
-        
+
         # --- A. Chargement ---
         imgs = batch['images'].to(device, non_blocking=True)
         img_masks = batch['image_masks'].to(device, non_blocking=True)
         input_ids = batch['input_ids'].to(device, non_blocking=True)
         text_mask = batch['text_mask'].to(device, non_blocking=True)
         x_cat = batch['x_cat'].to(device, non_blocking=True)
-        
+
         # Gradient activé sur le tabulaire continu pour l'importance
         x_cont = batch['x_cont'].to(device, non_blocking=True).clone().detach()
         x_cont.requires_grad = True 
         
         targets = batch['targets'].to(device, non_blocking=True)
         masks = batch['masks'].to(device, non_blocking=True)
-        
+
         # --- B. Forward ---
         with torch.set_grad_enabled(True):
             p_vente_log, p_loc_log, attentions = model(
                 images=imgs, image_masks=img_masks, input_ids=input_ids, 
                 text_mask=text_mask, x_cont=x_cont, x_cat=x_cat, return_attn=True
             )
-            
+
             # --- C. Feature Importance (Gradient) ---
             # On le fait sur quelques batchs pour ne pas saturer la RAM, 
             # ou sur tout si on veut être précis (ici on limite aux max_visu pour la vitesse)
