@@ -367,11 +367,11 @@ def main():
             if (val_loss < best_val_loss):
                 stagnation_counter = 0
                 best_val_loss = val_loss
-                torch.save(model.state_dict(), os.path.join(args.checkpoint_dir, f"best_model_ep{epoch}.pt"))
-                print(f"    *** NEW RECORD! best_model.pt sauvegardé (Val: {val_loss:.4f}) ***")
 
                 for f in glob.glob(os.path.join(args.checkpoint_dir, "best_model_*.pt")):
                     os.remove(f)
+                torch.save(model.state_dict(), os.path.join(args.checkpoint_dir, f"best_model_ep{epoch}.pt"))
+                print(f"    *** NEW RECORD! best_model.pt sauvegardé (Val: {val_loss:.4f}) ***")
 
             # Cas : On ne s'améliore pas
             else:
